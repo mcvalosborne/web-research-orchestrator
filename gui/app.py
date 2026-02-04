@@ -112,6 +112,111 @@ def init_session_state():
         st.session_state.agent_flow_log = []
 
 
+# ============ Cost Tracking ============
+
+# Pricing per 1M tokens (as of 2024)
+MODEL_PRICING = {
+    "claude-opus-4-5-20251101": {"input": 15.00, "output": 75.00},
+    "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
+    "claude-3-5-haiku-20241022": {"input": 0.80, "output": 4.00},
+    # Fallbacks for any model string containing these
+    "opus": {"input": 15.00, "output": 75.00},
+    "sonnet": {"input": 3.00, "output": 15.00},
+    "haiku": {"input": 0.80, "output": 4.00},
+}
+
+def get_model_pricing(model_name: str) -> dict:
+    """Get pricing for a model."""
+    if model_name in MODEL_PRICING:
+        return MODEL_PRICING[model_name]
+    # Fallback: check if model name contains known model type
+    for key in ["opus", "sonnet", "haiku"]:
+        if key in model_name.lower():
+            return MODEL_PRICING[key]
+    return MODEL_PRICING["sonnet"]  # Default to Sonnet pricing
+
+def calculate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
+    """Calculate cost for a single API call."""
+    pricing = get_model_pricing(model)
+    input_cost = (input_tokens / 1_000_000) * pricing["input"]
+    output_cost = (output_tokens / 1_000_000) * pricing["output"]
+    return input_cost + output_cost
+
+def calculate_opus_equivalent_cost(input_tokens: int, output_tokens: int) -> float:
+    """Calculate what it would cost if we used Opus for everything."""
+    pricing = MODEL_PRICING["opus"]
+    input_cost = (input_tokens / 1_000_000) * pricing["input"]
+    output_cost = (output_tokens / 1_000_000) * pricing["output"]
+    return input_cost + output_cost
+
+class CostTracker:
+    """Track API costs across a research session."""
+
+    def __init__(self):
+        self.calls = []
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+
+    def add_call(self, model: str, input_tokens: int, output_tokens: int, agent_type: str = "worker"):
+        """Record an API call."""
+        cost = calculate_cost(input_tokens, output_tokens, model)
+        self.calls.append({
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": cost,
+            "agent_type": agent_type
+        })
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+
+    def get_total_cost(self) -> float:
+        """Get total actual cost."""
+        return sum(c["cost"] for c in self.calls)
+
+    def get_opus_equivalent_cost(self) -> float:
+        """Get what it would cost with Opus only."""
+        return calculate_opus_equivalent_cost(self.total_input_tokens, self.total_output_tokens)
+
+    def get_savings(self) -> tuple:
+        """Get savings amount and percentage."""
+        actual = self.get_total_cost()
+        opus = self.get_opus_equivalent_cost()
+        savings = opus - actual
+        percentage = (savings / opus * 100) if opus > 0 else 0
+        return savings, percentage
+
+    def get_breakdown(self) -> dict:
+        """Get cost breakdown by agent type."""
+        breakdown = {"orchestrator": 0, "worker": 0, "analyst": 0, "qa": 0}
+        for call in self.calls:
+            agent_type = call.get("agent_type", "worker")
+            if agent_type in breakdown:
+                breakdown[agent_type] += call["cost"]
+            else:
+                breakdown["worker"] += call["cost"]
+        return breakdown
+
+    def get_summary(self) -> dict:
+        """Get full cost summary."""
+        actual_cost = self.get_total_cost()
+        opus_cost = self.get_opus_equivalent_cost()
+        savings, savings_pct = self.get_savings()
+
+        return {
+            "total_calls": len(self.calls),
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_tokens": self.total_input_tokens + self.total_output_tokens,
+            "actual_cost": actual_cost,
+            "opus_equivalent_cost": opus_cost,
+            "savings": savings,
+            "savings_percentage": savings_pct,
+            "breakdown": self.get_breakdown(),
+            "calls": self.calls
+        }
+
+
 def get_client():
     """Get Anthropic client."""
     api_key = st.session_state.api_key or os.environ.get('ANTHROPIC_API_KEY')
@@ -337,6 +442,9 @@ Return only the JSON object, no other text."""
         result['_success'] = 'error' not in result
         result['_attempt'] = 1
         result['_source'] = content_source
+        result['_model'] = model
+        result['_input_tokens'] = response.usage.input_tokens
+        result['_output_tokens'] = response.usage.output_tokens
 
         return result
 
@@ -346,6 +454,9 @@ Return only the JSON object, no other text."""
             '_url': url,
             '_success': False,
             '_attempt': 1,
+            '_model': model,
+            '_input_tokens': response.usage.input_tokens if 'response' in locals() else 0,
+            '_output_tokens': response.usage.output_tokens if 'response' in locals() else 0,
             'error': 'Failed to parse response as JSON',
             'raw_response': result_text[:500] if 'result_text' in locals() else 'No response'
         }
@@ -355,12 +466,15 @@ Return only the JSON object, no other text."""
             '_url': url,
             '_success': False,
             '_attempt': 1,
+            '_model': model,
+            '_input_tokens': 0,
+            '_output_tokens': 0,
             'error': str(e)
         }
 
 
-def run_discovery_search(client, topic: str, num_results: int = 10, model: str = "claude-sonnet-4-20250514", use_brave: bool = False) -> list:
-    """Use Claude to generate relevant search queries and find URLs."""
+def run_discovery_search(client, topic: str, num_results: int = 10, model: str = "claude-sonnet-4-20250514", use_brave: bool = False) -> tuple:
+    """Use Claude to generate relevant search queries and find URLs. Returns (results, token_info)."""
 
     log_agent_activity("Discovery", "active", f"Finding sources for: {topic[:50]}...")
 
@@ -370,7 +484,7 @@ def run_discovery_search(client, topic: str, num_results: int = 10, model: str =
         brave_results = brave_search(topic, num_results)
         if brave_results:
             log_agent_activity("Brave Search", "complete", f"Found {len(brave_results)} results")
-            return brave_results
+            return brave_results, {"input_tokens": 0, "output_tokens": 0, "model": model}
 
     prompt = f"""You are a research assistant. For the topic below, provide a list of {num_results} specific, real URLs that would be valuable sources for research.
 
@@ -405,16 +519,17 @@ Return only the JSON array, no other text."""
 
         results = json.loads(result_text)
         log_agent_activity("Discovery", "complete", f"Found {len(results)} sources")
-        return results
+        token_info = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens, "model": model}
+        return results, token_info
 
     except Exception as e:
         log_agent_activity("Discovery", "failed", f"Error: {str(e)[:50]}")
         st.error(f"Discovery search failed: {e}")
-        return []
+        return [], {"input_tokens": 0, "output_tokens": 0, "model": model}
 
 
-def analyze_failures_and_get_recovery_strategy(client, topic: str, failed_results: list, schema: dict, model: str = "claude-sonnet-4-20250514") -> dict:
-    """Analyze why extractions failed and generate recovery strategies."""
+def analyze_failures_and_get_recovery_strategy(client, topic: str, failed_results: list, schema: dict, model: str = "claude-sonnet-4-20250514") -> tuple:
+    """Analyze why extractions failed and generate recovery strategies. Returns (result, token_info)."""
 
     log_agent_activity("Recovery Planner", "active", "Analyzing failures...")
 
@@ -481,11 +596,12 @@ Return only the JSON object."""
 
         result = json.loads(result_text)
         log_agent_activity("Recovery Planner", "complete", f"Generated {len(result.get('alternative_urls', []))} alternatives")
-        return result
+        token_info = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens, "model": model}
+        return result, token_info
 
     except Exception as e:
         log_agent_activity("Recovery Planner", "failed", f"Error: {str(e)[:50]}")
-        return {"error": str(e)}
+        return {"error": str(e)}, {"input_tokens": 0, "output_tokens": 0, "model": model}
 
 
 def run_recovery_search_worker(client, query: str, topic: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022") -> dict:
@@ -539,6 +655,9 @@ Return only the JSON object."""
         result['_recovery'] = True
         result['_success'] = result.get('confidence') in ['high', 'medium']
         result['_attempt'] = 2
+        result['_model'] = model
+        result['_input_tokens'] = response.usage.input_tokens
+        result['_output_tokens'] = response.usage.output_tokens
 
         return result
 
@@ -548,6 +667,9 @@ Return only the JSON object."""
             '_recovery': True,
             '_success': False,
             '_attempt': 2,
+            '_model': model,
+            '_input_tokens': 0,
+            '_output_tokens': 0,
             'error': str(e),
             'query': query
         }
@@ -618,6 +740,9 @@ Return only the JSON object."""
         result['_recovery'] = True
         result['_success'] = 'error' not in result
         result['_attempt'] = 2
+        result['_model'] = model
+        result['_input_tokens'] = response.usage.input_tokens
+        result['_output_tokens'] = response.usage.output_tokens
 
         return result
 
@@ -628,12 +753,15 @@ Return only the JSON object."""
             '_recovery': True,
             '_success': False,
             '_attempt': 2,
+            '_model': model,
+            '_input_tokens': 0,
+            '_output_tokens': 0,
             'error': str(e)
         }
 
 
-def synthesize_results(client, topic: str, results: list, recovery_results: list = None, model: str = "claude-sonnet-4-20250514") -> dict:
-    """Use Sonnet to synthesize results into a final report."""
+def synthesize_results(client, topic: str, results: list, recovery_results: list = None, model: str = "claude-sonnet-4-20250514") -> tuple:
+    """Use Sonnet to synthesize results into a final report. Returns (result, token_info)."""
 
     log_agent_activity("Synthesizer", "active", "Analyzing all results...")
 
@@ -689,15 +817,16 @@ Return as JSON:
 
         result = json.loads(result_text)
         log_agent_activity("Synthesizer", "complete", "Synthesis complete")
-        return result
+        token_info = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens, "model": model}
+        return result, token_info
 
     except Exception as e:
         log_agent_activity("Synthesizer", "failed", f"Error: {str(e)[:50]}")
-        return {"error": str(e), "raw_results": all_results}
+        return {"error": str(e), "raw_results": all_results}, {"input_tokens": 0, "output_tokens": 0, "model": model}
 
 
-def run_analyst_agent(client, topic: str, results: dict, model: str = "claude-sonnet-4-20250514") -> dict:
-    """Analyst agent that creates visualizations and insights from the data."""
+def run_analyst_agent(client, topic: str, results: dict, model: str = "claude-sonnet-4-20250514") -> tuple:
+    """Analyst agent that creates visualizations and insights from the data. Returns (result, token_info)."""
 
     log_agent_activity("Analyst", "active", "Creating visualizations...")
 
@@ -754,15 +883,16 @@ Return as JSON:
 
         result = json.loads(result_text)
         log_agent_activity("Analyst", "complete", f"Created {len(result.get('charts', []))} charts")
-        return result
+        token_info = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens, "model": model}
+        return result, token_info
 
     except Exception as e:
         log_agent_activity("Analyst", "failed", f"Error: {str(e)[:50]}")
-        return {"error": str(e)}
+        return {"error": str(e)}, {"input_tokens": 0, "output_tokens": 0, "model": model}
 
 
-def run_followup_qa(client, question: str, results: dict, chat_history: list, model: str = "claude-sonnet-4-20250514") -> str:
-    """Answer follow-up questions about the research data."""
+def run_followup_qa(client, question: str, results: dict, chat_history: list, model: str = "claude-sonnet-4-20250514") -> tuple:
+    """Answer follow-up questions about the research data. Returns (answer, token_info)."""
 
     log_agent_activity("Q&A Agent", "active", f"Answering: {question[:40]}...")
 
@@ -817,11 +947,12 @@ Answer questions about this research data. Be specific and cite the data when re
 
         answer = response.content[0].text.strip()
         log_agent_activity("Q&A Agent", "complete", "Answered question")
-        return answer
+        token_info = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens, "model": model}
+        return answer, token_info
 
     except Exception as e:
         log_agent_activity("Q&A Agent", "failed", f"Error: {str(e)[:50]}")
-        return f"Error answering question: {str(e)}"
+        return f"Error answering question: {str(e)}", {"input_tokens": 0, "output_tokens": 0, "model": model}
 
 
 def main():
@@ -984,6 +1115,9 @@ def main():
                 # Clear previous flow log
                 st.session_state.agent_flow_log = []
 
+                # Initialize cost tracker
+                cost_tracker = CostTracker()
+
                 results = {
                     'topic': topic,
                     'timestamp': datetime.now().isoformat(),
@@ -993,7 +1127,8 @@ def main():
                     'recovery_results': [],
                     'recovery_strategy': None,
                     'synthesis': None,
-                    'analysis': None
+                    'analysis': None,
+                    'cost_summary': None
                 }
 
                 log_agent_activity("Orchestrator", "active", "Starting research...")
@@ -1002,7 +1137,12 @@ def main():
                 if research_type == "🔍 Auto-Discovery":
                     with st.status("🔍 Discovering sources...", expanded=True) as status:
                         render_agent_flow(flow_container)
-                        discovered = run_discovery_search(client, topic, num_sources, model=orchestrator_model, use_brave=use_brave)
+                        discovered, discovery_tokens = run_discovery_search(client, topic, num_sources, model=orchestrator_model, use_brave=use_brave)
+
+                        # Track discovery cost
+                        if discovery_tokens.get('input_tokens', 0) > 0:
+                            cost_tracker.add_call(discovery_tokens['model'], discovery_tokens['input_tokens'], discovery_tokens['output_tokens'], "orchestrator")
+
                         urls = [d['url'] for d in discovered]
                         results['sources'] = discovered
 
@@ -1033,6 +1173,11 @@ def main():
                             for future in as_completed(futures):
                                 result = future.result()
                                 extraction_results.append(result)
+
+                                # Track worker cost
+                                if result.get('_input_tokens', 0) > 0:
+                                    cost_tracker.add_call(result.get('_model', worker_model), result.get('_input_tokens', 0), result.get('_output_tokens', 0), "worker")
+
                                 completed += 1
                                 progress_bar.progress(completed / len(urls))
                                 render_agent_flow(flow_container)
@@ -1049,7 +1194,12 @@ def main():
                     if enable_recovery and success_rate < recovery_threshold and failed_results:
                         with st.status("🔄 Recovery phase...", expanded=True) as status:
                             render_agent_flow(flow_container)
-                            recovery_strategy = analyze_failures_and_get_recovery_strategy(client, topic, failed_results, schema, orchestrator_model)
+                            recovery_strategy, recovery_tokens = analyze_failures_and_get_recovery_strategy(client, topic, failed_results, schema, orchestrator_model)
+
+                            # Track recovery planning cost
+                            if recovery_tokens.get('input_tokens', 0) > 0:
+                                cost_tracker.add_call(recovery_tokens['model'], recovery_tokens['input_tokens'], recovery_tokens['output_tokens'], "orchestrator")
+
                             results['recovery_strategy'] = recovery_strategy
 
                             if 'error' not in recovery_strategy:
@@ -1067,7 +1217,13 @@ def main():
                                         futures[executor.submit(run_recovery_search_worker, client, query, topic, schema, len(alt_urls) + i, worker_model)] = i
 
                                     for future in as_completed(futures):
-                                        recovery_results.append(future.result())
+                                        result = future.result()
+                                        recovery_results.append(result)
+
+                                        # Track recovery worker cost
+                                        if result.get('_input_tokens', 0) > 0:
+                                            cost_tracker.add_call(result.get('_model', worker_model), result.get('_input_tokens', 0), result.get('_output_tokens', 0), "worker")
+
                                         render_agent_flow(flow_container)
 
                                 results['recovery_results'] = recovery_results
@@ -1076,19 +1232,32 @@ def main():
                     # Phase 4: Synthesis
                     with st.status("🧠 Synthesizing...", expanded=True) as status:
                         render_agent_flow(flow_container)
-                        synthesis = synthesize_results(client, topic, extraction_results, recovery_results, orchestrator_model)
+                        synthesis, synthesis_tokens = synthesize_results(client, topic, extraction_results, recovery_results, orchestrator_model)
+
+                        # Track synthesis cost
+                        if synthesis_tokens.get('input_tokens', 0) > 0:
+                            cost_tracker.add_call(synthesis_tokens['model'], synthesis_tokens['input_tokens'], synthesis_tokens['output_tokens'], "orchestrator")
+
                         results['synthesis'] = synthesis
                         status.update(label="✓ Synthesis complete", state="complete")
 
                     # Phase 5: Analysis
                     with st.status("📊 Creating analysis...", expanded=True) as status:
                         render_agent_flow(flow_container)
-                        analysis = run_analyst_agent(client, topic, results, orchestrator_model)
+                        analysis, analysis_tokens = run_analyst_agent(client, topic, results, orchestrator_model)
+
+                        # Track analyst cost
+                        if analysis_tokens.get('input_tokens', 0) > 0:
+                            cost_tracker.add_call(analysis_tokens['model'], analysis_tokens['input_tokens'], analysis_tokens['output_tokens'], "analyst")
+
                         results['analysis'] = analysis
                         status.update(label="✓ Analysis complete", state="complete")
 
                     log_agent_activity("Orchestrator", "complete", "Research complete!")
                     render_agent_flow(flow_container)
+
+                    # Store cost summary
+                    results['cost_summary'] = cost_tracker.get_summary()
 
                     # Save
                     st.session_state.current_results = results
@@ -1101,7 +1270,11 @@ def main():
 
                     total = len(extraction_results) + len(recovery_results)
                     success = sum(1 for r in extraction_results + recovery_results if r.get('_success'))
+
+                    # Display cost info
+                    cost_summary = results['cost_summary']
                     st.success(f"✅ Complete! {success}/{total} sources. Check Results & Analysis tabs.")
+                    st.info(f"💰 Cost: ${cost_summary['actual_cost']:.4f} (saved {cost_summary['savings_percentage']:.0f}% vs Opus-only: ${cost_summary['opus_equivalent_cost']:.4f})")
 
     with tab2:
         if st.session_state.current_results:
@@ -1151,6 +1324,37 @@ def main():
 
                 with st.expander("View JSON"):
                     st.json(all_res)
+
+            # Cost Summary
+            if results.get('cost_summary'):
+                st.divider()
+                st.markdown("### 💰 Cost Summary")
+                cost = results['cost_summary']
+
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Actual Cost", f"${cost['actual_cost']:.4f}")
+                with col2:
+                    st.metric("Opus Equivalent", f"${cost['opus_equivalent_cost']:.4f}")
+                with col3:
+                    st.metric("Savings", f"${cost['savings']:.4f}", f"{cost['savings_percentage']:.1f}%")
+                with col4:
+                    st.metric("Total Tokens", f"{cost['total_tokens']:,}")
+
+                with st.expander("📊 Cost Breakdown"):
+                    breakdown = cost.get('breakdown', {})
+                    breakdown_data = []
+                    for agent_type, agent_cost in breakdown.items():
+                        if agent_cost > 0:
+                            breakdown_data.append({
+                                'Agent Type': agent_type.title(),
+                                'Cost': f"${agent_cost:.4f}"
+                            })
+                    if breakdown_data:
+                        st.dataframe(pd.DataFrame(breakdown_data), use_container_width=True)
+
+                    st.caption(f"Total API calls: {cost['total_calls']}")
+                    st.caption(f"Input tokens: {cost['total_input_tokens']:,} | Output tokens: {cost['total_output_tokens']:,}")
         else:
             st.info("Run a research query first.")
 
@@ -1233,7 +1437,7 @@ def main():
                     st.session_state.chat_history.append({'role': 'user', 'content': question})
 
                     with st.spinner("Thinking..."):
-                        answer = run_followup_qa(client, question, st.session_state.current_results, st.session_state.chat_history, orchestrator_model)
+                        answer, qa_tokens = run_followup_qa(client, question, st.session_state.current_results, st.session_state.chat_history, orchestrator_model)
 
                     st.session_state.chat_history.append({'role': 'assistant', 'content': answer})
                     st.rerun()
