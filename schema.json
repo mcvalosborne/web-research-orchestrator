@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WebResearchOutput",
+  "description": "Standard output schema for web research orchestrator results",
+  "type": "object",
+  "required": ["research_topic", "query_date", "results"],
+  "properties": {
+    "research_topic": {
+      "type": "string",
+      "description": "The main topic or question being researched"
+    },
+    "query_date": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp when research was conducted"
+    },
+    "sources_checked": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "uri"
+      },
+      "description": "List of all URLs attempted during research"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ResearchResult"
+      },
+      "description": "Array of extracted data from each source"
+    },
+    "summary": {
+      "type": "string",
+      "description": "Brief synthesis of key findings"
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Information that couldn't be found or verified"
+    },
+    "methodology": {
+      "type": "string",
+      "description": "Description of research approach used"
+    },
+    "quality_assessment": {
+      "$ref": "#/definitions/QualityAssessment"
+    }
+  },
+  "definitions": {
+    "ResearchResult": {
+      "type": "object",
+      "required": ["source", "data", "confidence"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL of the data source"
+        },
+        "title": {
+          "type": "string",
+          "description": "Page or document title"
+        },
+        "data": {
+          "type": "object",
+          "description": "Extracted data matching the research schema"
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["high", "medium", "low"],
+          "description": "Confidence level in data accuracy"
+        },
+        "extracted_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When this specific source was processed"
+        },
+        "notes": {
+          "type": "string",
+          "description": "Any caveats or additional context"
+        },
+        "error": {
+          "type": "string",
+          "description": "Error message if extraction failed"
+        }
+      }
+    },
+    "QualityAssessment": {
+      "type": "object",
+      "properties": {
+        "completeness": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Percentage of expected data fields found"
+        },
+        "source_agreement": {
+          "type": "boolean",
+          "description": "Whether multiple sources corroborate findings"
+        },
+        "source_count": {
+          "type": "integer",
+          "description": "Number of sources successfully extracted"
+        },
+        "overall_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Overall quality score"
+        }
+      }
+    }
+  }
+}

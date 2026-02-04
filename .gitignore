@@ -1,0 +1,29 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Environment files
+.env
+.env.local
+*.local
+
+# API keys (never commit these)
+**/secrets/
+**/credentials/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Research output (may contain sensitive data)
+output/
+results/
+data/
