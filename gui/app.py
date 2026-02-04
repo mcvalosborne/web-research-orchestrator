@@ -1,6 +1,12 @@
 """
 Web Research Orchestrator - Streamlit GUI
 A visual interface for running multi-model web research with Claude.
+
+Features:
+- Multi-strategy extraction (CSS/Regex → LLM fallback)
+- Pydantic validation for data quality
+- Cost tracking and comparison
+- Parallel Haiku workers
 """
 
 import streamlit as st
@@ -12,6 +18,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import os
 import requests
+
+# Import multi-strategy extraction module
+try:
+    from extraction import (
+        MultiStrategyExtractor,
+        ExtractedData,
+        ValidationResult,
+        validate_extracted_data,
+        fetch_html_sync,
+        extract_with_fallback,
+        get_extraction_stats,
+    )
+    EXTRACTION_MODULE_AVAILABLE = True
+except ImportError:
+    EXTRACTION_MODULE_AVAILABLE = False
 
 # Page config
 st.set_page_config(
@@ -391,24 +412,144 @@ def firecrawl_scrape(url: str) -> dict:
 
 # ============ Worker Functions ============
 
-def run_haiku_worker(client, url: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022", use_firecrawl: bool = False, firecrawl_key: str = "") -> dict:
-    """Run a worker to extract data from a URL."""
+def run_haiku_worker(client, url: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022", use_firecrawl: bool = False, firecrawl_key: str = "", use_multi_strategy: bool = True) -> dict:
+    """
+    Run a worker to extract data from a URL.
+
+    Uses multi-strategy extraction:
+    1. CSS/XPath selectors (free, fast)
+    2. Regex patterns (free, fast)
+    3. LLM extraction (costly, slow) - only if needed
+
+    This reduces costs by ~60% by avoiding LLM calls when simpler methods work.
+    """
 
     # Note: Can't log from threads, will log from main thread after completion
 
-    # Try Firecrawl first if enabled (key passed from main thread)
     content_source = "direct"
     extra_content = ""
+    html_content = None
+    input_tokens = 0
+    output_tokens = 0
+
+    # Try Firecrawl first if enabled (key passed from main thread)
     if use_firecrawl and firecrawl_key:
         firecrawl_result = firecrawl_scrape_direct(url, firecrawl_key)
         if firecrawl_result.get('success'):
-            extra_content = f"\n\nSCRAPED CONTENT:\n{firecrawl_result.get('content', '')[:5000]}"
+            extra_content = firecrawl_result.get('content', '')[:8000]
+            html_content = extra_content
             content_source = "firecrawl"
+
+    # ============ Multi-Strategy Extraction (CSS/Regex first) ============
+    if use_multi_strategy and EXTRACTION_MODULE_AVAILABLE:
+        try:
+            # Fetch HTML if not already fetched via Firecrawl
+            if html_content is None:
+                html_content, fetch_error = fetch_html_sync(url, timeout=15)
+
+            if html_content:
+                # Try CSS/Regex extraction first (FREE)
+                extractor = MultiStrategyExtractor(html_content, url)
+                css_result = extractor.extract_all(schema)
+
+                # If we got good results without LLM, return early (cost savings!)
+                if css_result.confidence >= 0.6 and len(css_result.fields_missing) <= len(schema) * 0.3:
+                    # Validate the data
+                    validation = validate_extracted_data(css_result.data, schema)
+
+                    result = css_result.data.copy()
+                    result['_worker_id'] = worker_id
+                    result['_url'] = url
+                    result['_success'] = validation.is_valid or css_result.confidence >= 0.5
+                    result['_attempt'] = 1
+                    result['_source'] = content_source
+                    result['_extraction_method'] = css_result.extraction_method
+                    result['_confidence'] = css_result.confidence
+                    result['_model'] = 'none'  # No LLM used!
+                    result['_input_tokens'] = 0  # Free extraction
+                    result['_output_tokens'] = 0
+                    result['_fields_extracted'] = css_result.fields_extracted
+                    result['_fields_missing'] = css_result.fields_missing
+                    result['_validation_errors'] = css_result.validation_errors + validation.errors
+
+                    return result
+
+                # CSS/Regex got partial results - use LLM only for missing fields
+                if css_result.fields_extracted and css_result.fields_missing:
+                    # Only ask LLM about missing fields (cost optimization)
+                    missing_schema = {k: schema[k] for k in css_result.fields_missing}
+                    content_source = "hybrid"
+
+                    prompt = f"""You are a data extraction worker. I already extracted some data using HTML parsing.
+Extract ONLY the missing fields from this URL.
+
+URL: {url}
+
+CONTENT (first 5000 chars):
+{html_content[:5000]}
+
+ALREADY EXTRACTED (do not re-extract):
+{json.dumps(css_result.data, indent=2)}
+
+MISSING FIELDS TO EXTRACT:
+{json.dumps(missing_schema, indent=2)}
+
+Return ONLY valid JSON with the missing fields. Use null if not found."""
+
+                    response = client.messages.create(
+                        model=model,
+                        max_tokens=1500,
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+
+                    input_tokens = response.usage.input_tokens
+                    output_tokens = response.usage.output_tokens
+
+                    result_text = response.content[0].text.strip()
+                    if result_text.startswith("```"):
+                        result_text = result_text.split("```")[1]
+                        if result_text.startswith("json"):
+                            result_text = result_text[4:]
+
+                    llm_result = json.loads(result_text)
+
+                    # Merge CSS results with LLM results
+                    merged = css_result.data.copy()
+                    for k, v in llm_result.items():
+                        if v is not None and k not in merged:
+                            merged[k] = v
+
+                    # Validate merged data
+                    validation = validate_extracted_data(merged, schema)
+
+                    result = merged.copy()
+                    result['_worker_id'] = worker_id
+                    result['_url'] = url
+                    result['_success'] = 'error' not in result
+                    result['_attempt'] = 1
+                    result['_source'] = content_source
+                    result['_extraction_method'] = 'hybrid'
+                    result['_confidence'] = (css_result.confidence + 0.7) / 2
+                    result['_model'] = model
+                    result['_input_tokens'] = input_tokens
+                    result['_output_tokens'] = output_tokens
+                    result['_css_extracted'] = css_result.fields_extracted
+                    result['_llm_extracted'] = list(llm_result.keys())
+
+                    return result
+
+        except Exception as e:
+            # Multi-strategy failed, fall back to full LLM extraction
+            pass
+
+    # ============ Full LLM Extraction (fallback) ============
+    if html_content and len(html_content) > 100:
+        extra_content = f"\n\nPAGE CONTENT:\n{html_content[:5000]}"
 
     prompt = f"""You are a data extraction worker. Extract structured data from this URL.
 
 URL: {url}
-{extra_content}
+{extra_content if extra_content else ''}
 
 EXTRACTION SCHEMA:
 {json.dumps(schema, indent=2)}
@@ -437,11 +578,19 @@ Return only the JSON object, no other text."""
                 result_text = result_text[4:]
 
         result = json.loads(result_text)
+
+        # Validate with Pydantic if available
+        if EXTRACTION_MODULE_AVAILABLE:
+            validation = validate_extracted_data(result, schema)
+            if validation.cleaned_data:
+                result.update(validation.cleaned_data)
+
         result['_worker_id'] = worker_id
         result['_url'] = url
         result['_success'] = 'error' not in result
         result['_attempt'] = 1
         result['_source'] = content_source
+        result['_extraction_method'] = 'llm'
         result['_model'] = model
         result['_input_tokens'] = response.usage.input_tokens
         result['_output_tokens'] = response.usage.output_tokens
@@ -454,6 +603,7 @@ Return only the JSON object, no other text."""
             '_url': url,
             '_success': False,
             '_attempt': 1,
+            '_extraction_method': 'llm',
             '_model': model,
             '_input_tokens': response.usage.input_tokens if 'response' in locals() else 0,
             '_output_tokens': response.usage.output_tokens if 'response' in locals() else 0,
@@ -466,6 +616,7 @@ Return only the JSON object, no other text."""
             '_url': url,
             '_success': False,
             '_attempt': 1,
+            '_extraction_method': 'llm',
             '_model': model,
             '_input_tokens': 0,
             '_output_tokens': 0,
