@@ -384,6 +384,9 @@ def synthesize_results(client, topic: str, results: list, recovery_results: list
     successful = [r for r in all_results if r.get('_success', False)]
     failed = [r for r in all_results if not r.get('_success', False)]
 
+    # Build failed summary outside f-string to avoid escaping issues
+    failed_summary = [{'url': r.get('_url', r.get('query', 'unknown')), 'error': r.get('error', 'unknown')} for r in failed]
+
     prompt = f"""Synthesize these research results into a comprehensive summary.
 
 RESEARCH TOPIC: {topic}
@@ -392,7 +395,7 @@ SUCCESSFUL EXTRACTIONS ({len(successful)}):
 {json.dumps(successful, indent=2)}
 
 FAILED EXTRACTIONS ({len(failed)}):
-{json.dumps([{{'url': r.get('_url', r.get('query', 'unknown')), 'error': r.get('error', 'unknown')}} for r in failed], indent=2)}
+{json.dumps(failed_summary, indent=2)}
 
 Create a synthesis with:
 1. Executive Summary (3-5 sentences) - focus on what WAS found
