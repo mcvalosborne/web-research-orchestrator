@@ -11,6 +11,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import os
+import requests
 
 # Page config
 st.set_page_config(
@@ -36,20 +37,57 @@ st.markdown("""
         font-size: 1.1rem;
         margin-top: 0;
     }
-    .metric-card {
-        background: #1e1e2e;
-        border-radius: 10px;
+    .agent-flow {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        border-radius: 12px;
         padding: 20px;
-        border: 1px solid #333;
+        margin: 10px 0;
+        color: white;
+    }
+    .agent-node {
+        display: inline-block;
+        background: rgba(233, 69, 96, 0.2);
+        border: 2px solid #e94560;
+        border-radius: 8px;
+        padding: 8px 16px;
+        margin: 4px;
+        font-size: 0.9rem;
+    }
+    .agent-node.active {
+        background: #e94560;
+        animation: pulse 1s infinite;
+    }
+    .agent-node.complete {
+        background: rgba(46, 204, 113, 0.3);
+        border-color: #2ecc71;
+    }
+    .agent-node.failed {
+        background: rgba(231, 76, 60, 0.3);
+        border-color: #e74c3c;
+    }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
+    }
+    .flow-arrow {
+        color: #e94560;
+        font-size: 1.5rem;
+        margin: 0 8px;
     }
     .stProgress > div > div > div > div {
         background: linear-gradient(90deg, #e94560, #ff6b6b);
     }
-    .result-card {
-        background: #f8f9fa;
+    .chat-message {
+        padding: 12px;
         border-radius: 8px;
-        padding: 15px;
-        margin: 10px 0;
+        margin: 8px 0;
+    }
+    .chat-user {
+        background: #e8f4f8;
+        border-left: 4px solid #3498db;
+    }
+    .chat-assistant {
+        background: #f8f8f8;
         border-left: 4px solid #e94560;
     }
 </style>
@@ -64,6 +102,14 @@ def init_session_state():
         st.session_state.current_results = None
     if 'api_key' not in st.session_state:
         st.session_state.api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    if 'brave_api_key' not in st.session_state:
+        st.session_state.brave_api_key = os.environ.get('BRAVE_API_KEY', '')
+    if 'firecrawl_api_key' not in st.session_state:
+        st.session_state.firecrawl_api_key = os.environ.get('FIRECRAWL_API_KEY', '')
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    if 'agent_flow_log' not in st.session_state:
+        st.session_state.agent_flow_log = []
 
 
 def get_client():
@@ -74,11 +120,147 @@ def get_client():
     return anthropic.Anthropic(api_key=api_key)
 
 
-def run_haiku_worker(client, url: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022") -> dict:
+def log_agent_activity(agent_name: str, status: str, message: str):
+    """Log agent activity for visualization."""
+    st.session_state.agent_flow_log.append({
+        'timestamp': datetime.now().isoformat(),
+        'agent': agent_name,
+        'status': status,  # 'active', 'complete', 'failed'
+        'message': message
+    })
+
+
+def render_agent_flow(container):
+    """Render the agent flow visualization."""
+    if not st.session_state.agent_flow_log:
+        return
+
+    html = '<div class="agent-flow">'
+    html += '<h4 style="color: #e94560; margin-bottom: 15px;">🔄 Agent Activity Flow</h4>'
+
+    # Group by agent
+    agents = {}
+    for log in st.session_state.agent_flow_log:
+        agent = log['agent']
+        if agent not in agents:
+            agents[agent] = {'status': log['status'], 'messages': []}
+        agents[agent]['status'] = log['status']
+        agents[agent]['messages'].append(log['message'])
+
+    # Render flow
+    for i, (agent, data) in enumerate(agents.items()):
+        status_class = data['status']
+        html += f'<span class="agent-node {status_class}">{agent}</span>'
+        if i < len(agents) - 1:
+            html += '<span class="flow-arrow">→</span>'
+
+    html += '<div style="margin-top: 15px; font-size: 0.85rem; color: #aaa;">'
+    # Show last 5 activities
+    for log in st.session_state.agent_flow_log[-5:]:
+        icon = "🟢" if log['status'] == 'complete' else "🔴" if log['status'] == 'failed' else "🟡"
+        html += f'<div>{icon} [{log["agent"]}] {log["message"]}</div>'
+    html += '</div></div>'
+
+    container.markdown(html, unsafe_allow_html=True)
+
+
+# ============ API Integration Functions ============
+
+def brave_search(query: str, num_results: int = 10) -> list:
+    """Search using Brave Search API."""
+    if not st.session_state.brave_api_key:
+        return []
+
+    try:
+        headers = {
+            "Accept": "application/json",
+            "X-Subscription-Token": st.session_state.brave_api_key
+        }
+        params = {
+            "q": query,
+            "count": num_results
+        }
+        response = requests.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            headers=headers,
+            params=params,
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        results = []
+        for item in data.get('web', {}).get('results', []):
+            results.append({
+                'url': item.get('url'),
+                'title': item.get('title'),
+                'description': item.get('description', ''),
+                'type': 'search_result',
+                'relevance': 'high'
+            })
+        return results
+
+    except Exception as e:
+        st.warning(f"Brave Search failed: {e}")
+        return []
+
+
+def firecrawl_scrape(url: str) -> dict:
+    """Scrape a URL using Firecrawl API."""
+    if not st.session_state.firecrawl_api_key:
+        return {'error': 'Firecrawl API key not set'}
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {st.session_state.firecrawl_api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "url": url,
+            "formats": ["markdown"]
+        }
+        response = requests.post(
+            "https://api.firecrawl.dev/v1/scrape",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get('success'):
+            return {
+                'success': True,
+                'content': data.get('data', {}).get('markdown', ''),
+                'metadata': data.get('data', {}).get('metadata', {})
+            }
+        else:
+            return {'error': data.get('error', 'Unknown error')}
+
+    except Exception as e:
+        return {'error': str(e)}
+
+
+# ============ Worker Functions ============
+
+def run_haiku_worker(client, url: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022", use_firecrawl: bool = False) -> dict:
     """Run a worker to extract data from a URL."""
+
+    log_agent_activity(f"Worker-{worker_id}", "active", f"Fetching {url[:40]}...")
+
+    # Try Firecrawl first if enabled
+    content_source = "direct"
+    extra_content = ""
+    if use_firecrawl and st.session_state.firecrawl_api_key:
+        firecrawl_result = firecrawl_scrape(url)
+        if firecrawl_result.get('success'):
+            extra_content = f"\n\nSCRAPED CONTENT:\n{firecrawl_result.get('content', '')[:5000]}"
+            content_source = "firecrawl"
+
     prompt = f"""You are a data extraction worker. Extract structured data from this URL.
 
 URL: {url}
+{extra_content}
 
 EXTRACTION SCHEMA:
 {json.dumps(schema, indent=2)}
@@ -101,7 +283,6 @@ Return only the JSON object, no other text."""
 
         result_text = response.content[0].text.strip()
 
-        # Try to parse JSON from response
         if result_text.startswith("```"):
             result_text = result_text.split("```")[1]
             if result_text.startswith("json"):
@@ -112,9 +293,15 @@ Return only the JSON object, no other text."""
         result['_url'] = url
         result['_success'] = 'error' not in result
         result['_attempt'] = 1
+        result['_source'] = content_source
+
+        status = "complete" if result['_success'] else "failed"
+        log_agent_activity(f"Worker-{worker_id}", status, f"{'✓' if result['_success'] else '✗'} {url[:40]}...")
+
         return result
 
     except json.JSONDecodeError:
+        log_agent_activity(f"Worker-{worker_id}", "failed", f"JSON parse error for {url[:40]}...")
         return {
             '_worker_id': worker_id,
             '_url': url,
@@ -124,6 +311,7 @@ Return only the JSON object, no other text."""
             'raw_response': result_text[:500] if 'result_text' in locals() else 'No response'
         }
     except Exception as e:
+        log_agent_activity(f"Worker-{worker_id}", "failed", f"Error: {str(e)[:50]}...")
         return {
             '_worker_id': worker_id,
             '_url': url,
@@ -133,8 +321,19 @@ Return only the JSON object, no other text."""
         }
 
 
-def run_discovery_search(client, topic: str, num_results: int = 10, model: str = "claude-sonnet-4-20250514") -> list:
+def run_discovery_search(client, topic: str, num_results: int = 10, model: str = "claude-sonnet-4-20250514", use_brave: bool = False) -> list:
     """Use Claude to generate relevant search queries and find URLs."""
+
+    log_agent_activity("Discovery", "active", f"Finding sources for: {topic[:50]}...")
+
+    # Try Brave Search first if enabled
+    if use_brave and st.session_state.brave_api_key:
+        log_agent_activity("Brave Search", "active", "Searching web...")
+        brave_results = brave_search(topic, num_results)
+        if brave_results:
+            log_agent_activity("Brave Search", "complete", f"Found {len(brave_results)} results")
+            return brave_results
+
     prompt = f"""You are a research assistant. For the topic below, provide a list of {num_results} specific, real URLs that would be valuable sources for research.
 
 TOPIC: {topic}
@@ -166,15 +365,20 @@ Return only the JSON array, no other text."""
             if result_text.startswith("json"):
                 result_text = result_text[4:]
 
-        return json.loads(result_text)
+        results = json.loads(result_text)
+        log_agent_activity("Discovery", "complete", f"Found {len(results)} sources")
+        return results
 
     except Exception as e:
+        log_agent_activity("Discovery", "failed", f"Error: {str(e)[:50]}")
         st.error(f"Discovery search failed: {e}")
         return []
 
 
 def analyze_failures_and_get_recovery_strategy(client, topic: str, failed_results: list, schema: dict, model: str = "claude-sonnet-4-20250514") -> dict:
     """Analyze why extractions failed and generate recovery strategies."""
+
+    log_agent_activity("Recovery Planner", "active", "Analyzing failures...")
 
     failures_summary = []
     for r in failed_results:
@@ -237,14 +441,19 @@ Return only the JSON object."""
             if result_text.startswith("json"):
                 result_text = result_text[4:]
 
-        return json.loads(result_text)
+        result = json.loads(result_text)
+        log_agent_activity("Recovery Planner", "complete", f"Generated {len(result.get('alternative_urls', []))} alternatives")
+        return result
 
     except Exception as e:
+        log_agent_activity("Recovery Planner", "failed", f"Error: {str(e)[:50]}")
         return {"error": str(e)}
 
 
 def run_recovery_search_worker(client, query: str, topic: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022") -> dict:
     """Run a recovery worker that searches and extracts data using web search."""
+
+    log_agent_activity(f"Recovery-{worker_id}", "active", f"Searching: {query[:40]}...")
 
     prompt = f"""You are a research recovery worker. The direct website extraction failed, so you need to find the data through alternative means.
 
@@ -292,9 +501,14 @@ Return only the JSON object."""
         result['_recovery'] = True
         result['_success'] = result.get('confidence') in ['high', 'medium']
         result['_attempt'] = 2
+
+        status = "complete" if result['_success'] else "failed"
+        log_agent_activity(f"Recovery-{worker_id}", status, f"{'✓' if result['_success'] else '✗'} {query[:40]}...")
+
         return result
 
     except Exception as e:
+        log_agent_activity(f"Recovery-{worker_id}", "failed", f"Error: {str(e)[:50]}")
         return {
             '_worker_id': worker_id,
             '_recovery': True,
@@ -305,16 +519,26 @@ Return only the JSON object."""
         }
 
 
-def run_alternative_url_worker(client, url_info: dict, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022") -> dict:
+def run_alternative_url_worker(client, url_info: dict, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022", use_firecrawl: bool = False) -> dict:
     """Try to extract from an alternative URL suggested by recovery strategy."""
 
     url = url_info.get('url', '')
     rationale = url_info.get('rationale', '')
 
+    log_agent_activity(f"Alt-Worker-{worker_id}", "active", f"Trying: {url[:40]}...")
+
+    # Try Firecrawl if enabled
+    extra_content = ""
+    if use_firecrawl and st.session_state.firecrawl_api_key:
+        firecrawl_result = firecrawl_scrape(url)
+        if firecrawl_result.get('success'):
+            extra_content = f"\n\nSCRAPED CONTENT:\n{firecrawl_result.get('content', '')[:5000]}"
+
     prompt = f"""You are a data extraction worker trying an alternative source.
 
 URL: {url}
 WHY THIS SOURCE: {rationale}
+{extra_content}
 
 EXTRACTION SCHEMA:
 {json.dumps(schema, indent=2)}
@@ -360,9 +584,14 @@ Return only the JSON object."""
         result['_recovery'] = True
         result['_success'] = 'error' not in result
         result['_attempt'] = 2
+
+        status = "complete" if result['_success'] else "failed"
+        log_agent_activity(f"Alt-Worker-{worker_id}", status, f"{'✓' if result['_success'] else '✗'} {url[:40]}...")
+
         return result
 
     except Exception as e:
+        log_agent_activity(f"Alt-Worker-{worker_id}", "failed", f"Error: {str(e)[:50]}")
         return {
             '_worker_id': worker_id,
             '_url': url,
@@ -376,15 +605,15 @@ Return only the JSON object."""
 def synthesize_results(client, topic: str, results: list, recovery_results: list = None, model: str = "claude-sonnet-4-20250514") -> dict:
     """Use Sonnet to synthesize results into a final report."""
 
+    log_agent_activity("Synthesizer", "active", "Analyzing all results...")
+
     all_results = results.copy()
     if recovery_results:
         all_results.extend(recovery_results)
 
-    # Separate successful and failed
     successful = [r for r in all_results if r.get('_success', False)]
     failed = [r for r in all_results if not r.get('_success', False)]
 
-    # Build failed summary outside f-string to avoid escaping issues
     failed_summary = [{'url': r.get('_url', r.get('query', 'unknown')), 'error': r.get('error', 'unknown')} for r in failed]
 
     prompt = f"""Synthesize these research results into a comprehensive summary.
@@ -428,10 +657,141 @@ Return as JSON:
             if result_text.startswith("json"):
                 result_text = result_text[4:]
 
-        return json.loads(result_text)
+        result = json.loads(result_text)
+        log_agent_activity("Synthesizer", "complete", "Synthesis complete")
+        return result
 
     except Exception as e:
+        log_agent_activity("Synthesizer", "failed", f"Error: {str(e)[:50]}")
         return {"error": str(e), "raw_results": all_results}
+
+
+def run_analyst_agent(client, topic: str, results: dict, model: str = "claude-sonnet-4-20250514") -> dict:
+    """Analyst agent that creates visualizations and insights from the data."""
+
+    log_agent_activity("Analyst", "active", "Creating visualizations...")
+
+    all_results = results.get('extraction_results', []) + results.get('recovery_results', [])
+    successful = [r for r in all_results if r.get('_success', False)]
+
+    prompt = f"""You are a data analyst. Create visualizations and structured analysis from this research data.
+
+RESEARCH TOPIC: {topic}
+
+DATA COLLECTED:
+{json.dumps(successful, indent=2)}
+
+SYNTHESIS:
+{json.dumps(results.get('synthesis', {}), indent=2)}
+
+Create an analysis with:
+1. A summary table of the key data points (as markdown table)
+2. Comparison insights if multiple items were researched
+3. Trends or patterns you notice
+4. Recommended chart types for this data (with the data formatted for each)
+
+Return as JSON:
+{{
+  "summary_table_markdown": "| Column 1 | Column 2 |\\n|---|---|\\n| data | data |",
+  "comparison_insights": ["insight 1", "insight 2"],
+  "trends_patterns": ["pattern 1", "pattern 2"],
+  "charts": [
+    {{
+      "type": "bar|line|pie|scatter",
+      "title": "Chart title",
+      "description": "What this shows",
+      "data": {{"labels": [...], "values": [...], "series_name": "..."}}
+    }}
+  ],
+  "key_metrics": [
+    {{"metric": "name", "value": "X", "context": "explanation"}}
+  ]
+}}"""
+
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        result_text = response.content[0].text.strip()
+
+        if result_text.startswith("```"):
+            result_text = result_text.split("```")[1]
+            if result_text.startswith("json"):
+                result_text = result_text[4:]
+
+        result = json.loads(result_text)
+        log_agent_activity("Analyst", "complete", f"Created {len(result.get('charts', []))} charts")
+        return result
+
+    except Exception as e:
+        log_agent_activity("Analyst", "failed", f"Error: {str(e)[:50]}")
+        return {"error": str(e)}
+
+
+def run_followup_qa(client, question: str, results: dict, chat_history: list, model: str = "claude-sonnet-4-20250514") -> str:
+    """Answer follow-up questions about the research data."""
+
+    log_agent_activity("Q&A Agent", "active", f"Answering: {question[:40]}...")
+
+    # Build context from results
+    context = {
+        'topic': results.get('topic'),
+        'synthesis': results.get('synthesis'),
+        'successful_extractions': [r for r in results.get('extraction_results', []) + results.get('recovery_results', []) if r.get('_success')],
+        'sources': results.get('sources', [])
+    }
+
+    # Build chat messages
+    messages = []
+
+    # System context
+    messages.append({
+        "role": "user",
+        "content": f"""You are a research assistant helping analyze research data. Here is the context:
+
+RESEARCH TOPIC: {context['topic']}
+
+SYNTHESIS:
+{json.dumps(context['synthesis'], indent=2)}
+
+EXTRACTED DATA:
+{json.dumps(context['successful_extractions'], indent=2)}
+
+SOURCES:
+{json.dumps(context['sources'], indent=2)}
+
+Answer questions about this research data. Be specific and cite the data when relevant."""
+    })
+
+    messages.append({
+        "role": "assistant",
+        "content": "I understand the research data. I'm ready to answer your questions about the findings."
+    })
+
+    # Add chat history
+    for msg in chat_history[-10:]:  # Last 10 messages
+        messages.append({"role": msg['role'], "content": msg['content']})
+
+    # Add current question
+    messages.append({"role": "user", "content": question})
+
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=2000,
+            messages=messages
+        )
+
+        answer = response.content[0].text.strip()
+        log_agent_activity("Q&A Agent", "complete", "Answered question")
+        return answer
+
+    except Exception as e:
+        log_agent_activity("Q&A Agent", "failed", f"Error: {str(e)[:50]}")
+        return f"Error answering question: {str(e)}"
 
 
 def main():
@@ -439,27 +799,54 @@ def main():
 
     # Header
     st.markdown('<p class="main-header">🔬 Web Research Orchestrator</p>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Multi-model research with automatic retry & recovery</p>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Multi-model research with automatic retry, analysis & visualization</p>', unsafe_allow_html=True)
     st.divider()
 
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Configuration")
 
-        # API Key
-        api_key_input = st.text_input(
-            "Anthropic API Key",
-            value=st.session_state.api_key,
-            type="password",
-            help="Your Anthropic API key. Set ANTHROPIC_API_KEY env var to skip this."
-        )
-        if api_key_input:
-            st.session_state.api_key = api_key_input
+        # API Keys Section
+        with st.expander("🔑 API Keys", expanded=True):
+            api_key_input = st.text_input(
+                "Anthropic API Key *",
+                value=st.session_state.api_key,
+                type="password",
+                help="Required. Set ANTHROPIC_API_KEY env var to skip."
+            )
+            if api_key_input:
+                st.session_state.api_key = api_key_input
+
+            st.divider()
+
+            brave_key_input = st.text_input(
+                "Brave Search API Key",
+                value=st.session_state.brave_api_key,
+                type="password",
+                help="Optional. Enables real web search. Get free key at brave.com/search/api/"
+            )
+            if brave_key_input:
+                st.session_state.brave_api_key = brave_key_input
+
+            firecrawl_key_input = st.text_input(
+                "Firecrawl API Key",
+                value=st.session_state.firecrawl_api_key,
+                type="password",
+                help="Optional. Enables JS rendering & anti-bot bypass. Get free key at firecrawl.dev"
+            )
+            if firecrawl_key_input:
+                st.session_state.firecrawl_api_key = firecrawl_key_input
+
+            # Show API status
+            st.caption("API Status:")
+            st.caption(f"{'✅' if st.session_state.api_key else '❌'} Anthropic (required)")
+            st.caption(f"{'✅' if st.session_state.brave_api_key else '⬜'} Brave Search (optional)")
+            st.caption(f"{'✅' if st.session_state.firecrawl_api_key else '⬜'} Firecrawl (optional)")
 
         st.divider()
 
         # Model selection
-        st.subheader("Models")
+        st.subheader("🤖 Models")
         orchestrator_model = st.selectbox(
             "Orchestrator",
             ["claude-sonnet-4-20250514", "claude-opus-4-5-20251101"],
@@ -474,32 +861,30 @@ def main():
         st.divider()
 
         # Worker settings
-        st.subheader("Workers")
+        st.subheader("⚙️ Settings")
         max_workers = st.slider("Max Parallel Workers", 1, 10, 5)
 
-        st.divider()
+        enable_recovery = st.checkbox("Enable automatic retry", value=True)
+        recovery_threshold = st.slider("Retry if success below", 0, 100, 50, format="%d%%")
 
-        # Recovery settings
-        st.subheader("🔄 Recovery Settings")
-        enable_recovery = st.checkbox("Enable automatic retry", value=True, help="Try alternative sources if primary extraction fails")
-        recovery_threshold = st.slider("Retry if success rate below", 0, 100, 50, format="%d%%", help="Trigger recovery if fewer than X% of sources succeed")
+        use_brave = st.checkbox("Use Brave Search", value=bool(st.session_state.brave_api_key), disabled=not st.session_state.brave_api_key)
+        use_firecrawl = st.checkbox("Use Firecrawl", value=bool(st.session_state.firecrawl_api_key), disabled=not st.session_state.firecrawl_api_key)
 
         st.divider()
 
         # History
-        st.subheader("📜 Research History")
+        st.subheader("📜 History")
         if st.session_state.research_history:
             for i, item in enumerate(reversed(st.session_state.research_history[-5:])):
-                with st.expander(f"{item['topic'][:30]}...", expanded=False):
-                    st.caption(item['timestamp'])
-                    if st.button("Load", key=f"load_{i}"):
-                        st.session_state.current_results = item['results']
-                        st.rerun()
+                if st.button(f"📄 {item['topic'][:25]}...", key=f"hist_{i}", use_container_width=True):
+                    st.session_state.current_results = item['results']
+                    st.session_state.chat_history = []
+                    st.rerun()
         else:
-            st.caption("No research history yet")
+            st.caption("No history yet")
 
     # Main content
-    tab1, tab2, tab3 = st.tabs(["🔍 New Research", "📊 Results", "📥 Export"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Research", "📊 Results", "📈 Analysis", "💬 Q&A", "📥 Export"])
 
     with tab1:
         col1, col2 = st.columns([2, 1])
@@ -508,22 +893,23 @@ def main():
             st.subheader("Research Topic")
             topic = st.text_area(
                 "What would you like to research?",
-                placeholder="e.g., Compare pricing for top 5 project management tools (Asana, Monday, Notion, ClickUp, Linear)",
+                placeholder="e.g., Compare pricing for top 5 project management tools",
                 height=100
             )
 
             research_type = st.radio(
                 "Research Type",
-                ["🎯 Custom URLs", "🔍 Auto-Discovery"],
+                ["🔍 Auto-Discovery", "🎯 Custom URLs"],
                 horizontal=True
             )
 
         with col2:
             st.subheader("Extraction Schema")
             default_schema = {
-                "title": "Page title",
-                "main_points": ["Key points"],
-                "data": {},
+                "title": "Page/item title",
+                "price": "Price if applicable",
+                "features": ["Key features"],
+                "data_points": {},
                 "confidence": "high|medium|low"
             }
             schema_json = st.text_area(
@@ -542,26 +928,32 @@ def main():
         st.divider()
 
         if research_type == "🎯 Custom URLs":
-            st.subheader("URLs to Research")
             urls_input = st.text_area(
                 "Enter URLs (one per line)",
-                placeholder="https://asana.com/pricing\nhttps://monday.com/pricing\nhttps://notion.so/pricing",
-                height=150
+                placeholder="https://example.com/pricing",
+                height=100
             )
             urls = [u.strip() for u in urls_input.strip().split('\n') if u.strip()]
+            num_sources = len(urls)
         else:
-            num_sources = st.slider("Number of sources to discover", 5, 20, 10)
+            num_sources = st.slider("Number of sources", 5, 20, 10)
             urls = []
+
+        # Agent flow visualization placeholder
+        flow_container = st.empty()
 
         # Run button
         if st.button("🚀 Start Research", type="primary", use_container_width=True):
             client = get_client()
 
             if not client:
-                st.error("Please enter your Anthropic API key in the sidebar")
+                st.error("Please enter your Anthropic API key")
             elif not topic:
                 st.error("Please enter a research topic")
             else:
+                # Clear previous flow log
+                st.session_state.agent_flow_log = []
+
                 results = {
                     'topic': topic,
                     'timestamp': datetime.now().isoformat(),
@@ -570,346 +962,298 @@ def main():
                     'extraction_results': [],
                     'recovery_results': [],
                     'recovery_strategy': None,
-                    'synthesis': None
+                    'synthesis': None,
+                    'analysis': None
                 }
 
-                # Phase 1: Discovery (if auto-discovery)
+                log_agent_activity("Orchestrator", "active", "Starting research...")
+
+                # Phase 1: Discovery
                 if research_type == "🔍 Auto-Discovery":
                     with st.status("🔍 Discovering sources...", expanded=True) as status:
-                        st.write(f"Using {orchestrator_model.split('-')[1].title()} to find relevant URLs...")
-                        discovered = run_discovery_search(client, topic, num_sources, model=orchestrator_model)
+                        render_agent_flow(flow_container)
+                        discovered = run_discovery_search(client, topic, num_sources, model=orchestrator_model, use_brave=use_brave)
                         urls = [d['url'] for d in discovered]
                         results['sources'] = discovered
 
                         if urls:
-                            st.write(f"Found {len(urls)} sources:")
-                            for d in discovered:
-                                st.write(f"  • [{d.get('type', 'unknown')}] {d.get('title', d['url'][:50])}")
+                            st.write(f"Found {len(urls)} sources")
                         status.update(label=f"✓ Found {len(urls)} sources", state="complete")
                 else:
                     results['sources'] = [{'url': u} for u in urls]
 
                 if not urls:
-                    st.error("No URLs to research. Please add URLs or try auto-discovery.")
+                    st.error("No URLs to research")
                 else:
-                    # Phase 2: Initial extraction
-                    with st.status(f"⚡ Extracting data from {len(urls)} sources...", expanded=True) as status:
+                    # Phase 2: Extraction
+                    with st.status(f"⚡ Extracting from {len(urls)} sources...", expanded=True) as status:
                         progress_bar = st.progress(0)
-                        progress_text = st.empty()
-
                         extraction_results = []
 
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = {
-                                executor.submit(run_haiku_worker, client, url, schema, i, model=worker_model): (i, url)
+                                executor.submit(run_haiku_worker, client, url, schema, i, worker_model, use_firecrawl): (i, url)
                                 for i, url in enumerate(urls)
                             }
 
                             completed = 0
                             for future in as_completed(futures):
-                                worker_id, url = futures[future]
                                 result = future.result()
                                 extraction_results.append(result)
-
                                 completed += 1
                                 progress_bar.progress(completed / len(urls))
-                                status_icon = "✅" if result.get('_success') else "❌"
-                                progress_text.write(f"{status_icon} {completed}/{len(urls)}: {url[:50]}...")
+                                render_agent_flow(flow_container)
 
                         results['extraction_results'] = extraction_results
-                        success_count = sum(1 for r in extraction_results if r.get('_success', False))
-                        success_rate = (success_count / len(urls)) * 100 if urls else 0
-                        status.update(
-                            label=f"✓ Initial extraction: {success_count}/{len(urls)} sources ({success_rate:.0f}%)",
-                            state="complete"
-                        )
+                        success_count = sum(1 for r in extraction_results if r.get('_success'))
+                        success_rate = (success_count / len(urls)) * 100
+                        status.update(label=f"✓ {success_count}/{len(urls)} succeeded ({success_rate:.0f}%)", state="complete")
 
-                    # Phase 3: Recovery (if enabled and needed)
-                    failed_results = [r for r in extraction_results if not r.get('_success', False)]
+                    # Phase 3: Recovery
+                    failed_results = [r for r in extraction_results if not r.get('_success')]
                     recovery_results = []
 
                     if enable_recovery and success_rate < recovery_threshold and failed_results:
-                        # Phase 3a: Analyze failures and get strategy
-                        with st.status("🔄 Analyzing failures and planning recovery...", expanded=True) as status:
-                            st.write(f"⚠️ Only {success_rate:.0f}% success rate - initiating recovery...")
-                            st.write("Analyzing why extractions failed...")
-
-                            recovery_strategy = analyze_failures_and_get_recovery_strategy(
-                                client, topic, failed_results, schema, model=orchestrator_model
-                            )
+                        with st.status("🔄 Recovery phase...", expanded=True) as status:
+                            render_agent_flow(flow_container)
+                            recovery_strategy = analyze_failures_and_get_recovery_strategy(client, topic, failed_results, schema, orchestrator_model)
                             results['recovery_strategy'] = recovery_strategy
 
                             if 'error' not in recovery_strategy:
-                                st.write(f"📋 Analysis: {recovery_strategy.get('failure_analysis', 'Unknown')}")
-                                st.write(f"📍 Found {len(recovery_strategy.get('alternative_urls', []))} alternative URLs")
-                                st.write(f"🔎 Generated {len(recovery_strategy.get('web_search_queries', []))} search queries")
+                                alt_urls = recovery_strategy.get('alternative_urls', [])[:5]
+                                queries = recovery_strategy.get('web_search_queries', [])[:5]
 
-                            status.update(label="✓ Recovery strategy ready", state="complete")
+                                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                                    futures = {}
+                                    for i, url_info in enumerate(alt_urls):
+                                        futures[executor.submit(run_alternative_url_worker, client, url_info, schema, i, worker_model, use_firecrawl)] = i
+                                    for i, query in enumerate(queries):
+                                        futures[executor.submit(run_recovery_search_worker, client, query, topic, schema, len(alt_urls) + i, worker_model)] = i
 
-                        # Phase 3b: Execute recovery
-                        if 'error' not in recovery_strategy:
-                            with st.status("🔄 Executing recovery attempts...", expanded=True) as status:
-                                progress_bar = st.progress(0)
-                                progress_text = st.empty()
+                                    for future in as_completed(futures):
+                                        recovery_results.append(future.result())
+                                        render_agent_flow(flow_container)
 
-                                # Collect all recovery tasks
-                                alt_urls = recovery_strategy.get('alternative_urls', [])[:5]  # Limit to 5
-                                search_queries = recovery_strategy.get('web_search_queries', [])[:5]  # Limit to 5
+                                results['recovery_results'] = recovery_results
+                            status.update(label=f"✓ Recovery: {sum(1 for r in recovery_results if r.get('_success'))} additional", state="complete")
 
-                                total_recovery = len(alt_urls) + len(search_queries)
-
-                                if total_recovery > 0:
-                                    st.write(f"Trying {len(alt_urls)} alternative URLs and {len(search_queries)} search queries...")
-
-                                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                                        futures = {}
-
-                                        # Submit alternative URL workers
-                                        for i, url_info in enumerate(alt_urls):
-                                            futures[executor.submit(
-                                                run_alternative_url_worker, client, url_info, schema, i, model=worker_model
-                                            )] = ('url', i, url_info.get('url', 'unknown'))
-
-                                        # Submit search query workers
-                                        for i, query in enumerate(search_queries):
-                                            futures[executor.submit(
-                                                run_recovery_search_worker, client, query, topic, schema, len(alt_urls) + i, model=worker_model
-                                            )] = ('search', i, query)
-
-                                        completed = 0
-                                        for future in as_completed(futures):
-                                            task_type, idx, identifier = futures[future]
-                                            result = future.result()
-                                            recovery_results.append(result)
-
-                                            completed += 1
-                                            progress_bar.progress(completed / total_recovery)
-                                            status_icon = "✅" if result.get('_success') else "❌"
-                                            progress_text.write(f"{status_icon} Recovery {completed}/{total_recovery}: {identifier[:50]}...")
-
-                                    results['recovery_results'] = recovery_results
-                                    recovery_success = sum(1 for r in recovery_results if r.get('_success', False))
-                                    status.update(
-                                        label=f"✓ Recovery complete: {recovery_success}/{total_recovery} additional sources",
-                                        state="complete"
-                                    )
-                                else:
-                                    st.write("No recovery strategies available")
-                                    status.update(label="✓ No recovery options", state="complete")
-
-                    # Phase 4: Final synthesis
-                    with st.status("🧠 Synthesizing all results...", expanded=True) as status:
-                        total_success = sum(1 for r in extraction_results if r.get('_success', False))
-                        total_success += sum(1 for r in recovery_results if r.get('_success', False))
-                        st.write(f"Synthesizing {total_success} successful extractions...")
-
-                        synthesis = synthesize_results(
-                            client, topic, extraction_results, recovery_results, model=orchestrator_model
-                        )
+                    # Phase 4: Synthesis
+                    with st.status("🧠 Synthesizing...", expanded=True) as status:
+                        render_agent_flow(flow_container)
+                        synthesis = synthesize_results(client, topic, extraction_results, recovery_results, orchestrator_model)
                         results['synthesis'] = synthesis
                         status.update(label="✓ Synthesis complete", state="complete")
 
-                    # Save results
+                    # Phase 5: Analysis
+                    with st.status("📊 Creating analysis...", expanded=True) as status:
+                        render_agent_flow(flow_container)
+                        analysis = run_analyst_agent(client, topic, results, orchestrator_model)
+                        results['analysis'] = analysis
+                        status.update(label="✓ Analysis complete", state="complete")
+
+                    log_agent_activity("Orchestrator", "complete", "Research complete!")
+                    render_agent_flow(flow_container)
+
+                    # Save
                     st.session_state.current_results = results
+                    st.session_state.chat_history = []
                     st.session_state.research_history.append({
                         'topic': topic,
                         'timestamp': results['timestamp'],
                         'results': results
                     })
 
-                    # Final summary
-                    total_attempted = len(extraction_results) + len(recovery_results)
-                    total_success = sum(1 for r in extraction_results + recovery_results if r.get('_success', False))
-
-                    if total_success > 0:
-                        st.success(f"✅ Research complete! Found data from {total_success}/{total_attempted} sources. Check the Results tab.")
-                        st.balloons()
-                    else:
-                        st.warning(f"⚠️ Research complete but no data could be extracted. Check Results tab for recommendations.")
+                    total = len(extraction_results) + len(recovery_results)
+                    success = sum(1 for r in extraction_results + recovery_results if r.get('_success'))
+                    st.success(f"✅ Complete! {success}/{total} sources. Check Results & Analysis tabs.")
 
     with tab2:
         if st.session_state.current_results:
             results = st.session_state.current_results
 
             st.subheader(f"📋 {results['topic']}")
-            st.caption(f"Completed: {results['timestamp']}")
 
-            # Synthesis
             if results.get('synthesis') and 'error' not in results['synthesis']:
                 synthesis = results['synthesis']
 
                 st.markdown("### Executive Summary")
-                st.info(synthesis.get('executive_summary', 'No summary available'))
+                st.info(synthesis.get('executive_summary', 'N/A'))
 
                 col1, col2 = st.columns(2)
-
                 with col1:
                     st.markdown("### Key Findings")
-                    for finding in synthesis.get('key_findings', []):
-                        st.markdown(f"• {finding}")
+                    for f in synthesis.get('key_findings', []):
+                        st.markdown(f"• {f}")
 
                 with col2:
-                    st.markdown("### Quality Assessment")
+                    st.markdown("### Quality")
                     qa = synthesis.get('quality_assessment', {})
                     st.metric("Completeness", qa.get('completeness', 'N/A'))
                     st.metric("Confidence", qa.get('confidence', 'N/A'))
-                    st.metric("Sources Used", qa.get('sources_used', 'N/A'))
 
                 if synthesis.get('gaps'):
-                    st.markdown("### Gaps & Limitations")
-                    for gap in synthesis['gaps']:
-                        st.markdown(f"• {gap}")
+                    with st.expander("Gaps & Limitations"):
+                        for g in synthesis['gaps']:
+                            st.markdown(f"• {g}")
 
                 if synthesis.get('recommendations'):
-                    st.markdown("### 💡 Recommendations")
-                    for rec in synthesis['recommendations']:
-                        st.markdown(f"• {rec}")
-
-                if synthesis.get('manual_followup_needed'):
-                    st.markdown("### 📝 Manual Follow-up Needed")
-                    for item in synthesis['manual_followup_needed']:
-                        st.markdown(f"• {item}")
+                    with st.expander("💡 Recommendations"):
+                        for r in synthesis['recommendations']:
+                            st.markdown(f"• {r}")
 
             st.divider()
+            st.markdown("### Raw Results")
+            all_res = results.get('extraction_results', []) + results.get('recovery_results', [])
+            if all_res:
+                df_data = [{
+                    'Source': r.get('_url', r.get('query', 'N/A'))[:50],
+                    'Type': 'Recovery' if r.get('_recovery') else 'Primary',
+                    'Status': '✅' if r.get('_success') else '❌',
+                    'Confidence': r.get('confidence', '-')
+                } for r in all_res]
+                st.dataframe(pd.DataFrame(df_data), use_container_width=True)
 
-            # Recovery strategy (if used)
-            if results.get('recovery_strategy') and 'error' not in results.get('recovery_strategy', {}):
-                with st.expander("🔄 Recovery Strategy Used"):
-                    strategy = results['recovery_strategy']
-                    st.write(f"**Failure Analysis:** {strategy.get('failure_analysis', 'N/A')}")
-
-                    if strategy.get('alternative_urls'):
-                        st.write("**Alternative URLs Tried:**")
-                        for url_info in strategy['alternative_urls']:
-                            st.write(f"  • {url_info.get('url', 'N/A')} - {url_info.get('rationale', '')}")
-
-                    if strategy.get('web_search_queries'):
-                        st.write("**Search Queries Used:**")
-                        for query in strategy['web_search_queries']:
-                            st.write(f"  • {query}")
-
-            # Raw results table
-            st.markdown("### 📊 Extraction Results")
-
-            all_results = results.get('extraction_results', []) + results.get('recovery_results', [])
-            if all_results:
-                # Create DataFrame for display
-                df_data = []
-                for r in all_results:
-                    source = r.get('_url', r.get('query', 'N/A'))
-                    row = {
-                        'Source': source[:50] + '...' if len(source) > 50 else source,
-                        'Type': 'Recovery' if r.get('_recovery') else 'Primary',
-                        'Status': '✅' if r.get('_success') else '❌',
-                        'Confidence': r.get('confidence', '-'),
-                        'Error': r.get('error', '-') if not r.get('_success') else '-'
-                    }
-                    df_data.append(row)
-
-                df = pd.DataFrame(df_data)
-                st.dataframe(df, use_container_width=True)
-
-                # Expandable raw JSON
-                with st.expander("View Raw JSON"):
-                    st.json(all_results)
+                with st.expander("View JSON"):
+                    st.json(all_res)
         else:
-            st.info("No results yet. Run a research query in the 'New Research' tab.")
+            st.info("Run a research query first.")
 
     with tab3:
+        if st.session_state.current_results and st.session_state.current_results.get('analysis'):
+            analysis = st.session_state.current_results['analysis']
+
+            if 'error' not in analysis:
+                st.markdown("### 📊 Data Analysis")
+
+                # Summary table
+                if analysis.get('summary_table_markdown'):
+                    st.markdown("#### Summary Table")
+                    st.markdown(analysis['summary_table_markdown'])
+
+                # Key metrics
+                if analysis.get('key_metrics'):
+                    st.markdown("#### Key Metrics")
+                    cols = st.columns(min(len(analysis['key_metrics']), 4))
+                    for i, metric in enumerate(analysis['key_metrics']):
+                        with cols[i % len(cols)]:
+                            st.metric(metric.get('metric', 'N/A'), metric.get('value', 'N/A'))
+                            st.caption(metric.get('context', ''))
+
+                # Charts
+                if analysis.get('charts'):
+                    st.markdown("#### Visualizations")
+                    for chart in analysis['charts']:
+                        st.markdown(f"**{chart.get('title', 'Chart')}**")
+                        st.caption(chart.get('description', ''))
+
+                        data = chart.get('data', {})
+                        chart_type = chart.get('type', 'bar')
+
+                        if data.get('labels') and data.get('values'):
+                            df = pd.DataFrame({
+                                'Category': data['labels'],
+                                'Value': data['values']
+                            })
+
+                            if chart_type == 'bar':
+                                st.bar_chart(df.set_index('Category'))
+                            elif chart_type == 'line':
+                                st.line_chart(df.set_index('Category'))
+                            else:
+                                st.dataframe(df)
+
+                # Insights
+                if analysis.get('comparison_insights'):
+                    st.markdown("#### Insights")
+                    for insight in analysis['comparison_insights']:
+                        st.markdown(f"• {insight}")
+
+                if analysis.get('trends_patterns'):
+                    st.markdown("#### Trends & Patterns")
+                    for trend in analysis['trends_patterns']:
+                        st.markdown(f"• {trend}")
+            else:
+                st.error(f"Analysis error: {analysis.get('error')}")
+        else:
+            st.info("Run a research query to see analysis.")
+
+    with tab4:
+        if st.session_state.current_results:
+            st.markdown("### 💬 Ask Questions About Your Research")
+            st.caption(f"Topic: {st.session_state.current_results.get('topic', 'N/A')}")
+
+            # Display chat history
+            for msg in st.session_state.chat_history:
+                css_class = "chat-user" if msg['role'] == 'user' else "chat-assistant"
+                icon = "🧑" if msg['role'] == 'user' else "🤖"
+                st.markdown(f'<div class="chat-message {css_class}">{icon} {msg["content"]}</div>', unsafe_allow_html=True)
+
+            # Input
+            question = st.text_input("Ask a question about the research data", key="qa_input", placeholder="e.g., What's the cheapest option? Which has the most features?")
+
+            if st.button("Ask", type="primary") and question:
+                client = get_client()
+                if client:
+                    st.session_state.chat_history.append({'role': 'user', 'content': question})
+
+                    with st.spinner("Thinking..."):
+                        answer = run_followup_qa(client, question, st.session_state.current_results, st.session_state.chat_history, orchestrator_model)
+
+                    st.session_state.chat_history.append({'role': 'assistant', 'content': answer})
+                    st.rerun()
+
+            if st.button("Clear Chat"):
+                st.session_state.chat_history = []
+                st.rerun()
+        else:
+            st.info("Run a research query first to ask questions.")
+
+    with tab5:
         if st.session_state.current_results:
             results = st.session_state.current_results
 
-            st.subheader("📥 Export Results")
+            st.subheader("📥 Export")
 
             col1, col2, col3 = st.columns(3)
 
             with col1:
-                # JSON export
-                json_str = json.dumps(results, indent=2, default=str)
                 st.download_button(
-                    "📄 Download JSON",
-                    json_str,
-                    file_name=f"research_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json",
+                    "📄 JSON",
+                    json.dumps(results, indent=2, default=str),
+                    f"research_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    "application/json",
                     use_container_width=True
                 )
 
             with col2:
-                # CSV export (extraction results only)
-                all_results = results.get('extraction_results', []) + results.get('recovery_results', [])
-                if all_results:
-                    df = pd.json_normalize(all_results)
-                    csv = df.to_csv(index=False)
+                all_res = results.get('extraction_results', []) + results.get('recovery_results', [])
+                if all_res:
+                    df = pd.json_normalize(all_res)
                     st.download_button(
-                        "📊 Download CSV",
-                        csv,
-                        file_name=f"research_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv",
+                        "📊 CSV",
+                        df.to_csv(index=False),
+                        f"research_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        "text/csv",
                         use_container_width=True
                     )
 
             with col3:
-                # Markdown export
-                md = f"""# Research Report: {results['topic']}
-
-**Date:** {results['timestamp']}
-
-## Executive Summary
-
-{results.get('synthesis', {}).get('executive_summary', 'N/A')}
-
-## Key Findings
-
-"""
-                for finding in results.get('synthesis', {}).get('key_findings', []):
-                    md += f"- {finding}\n"
-
-                md += f"""
-## Quality Assessment
-
-- **Completeness:** {results.get('synthesis', {}).get('quality_assessment', {}).get('completeness', 'N/A')}
-- **Confidence:** {results.get('synthesis', {}).get('quality_assessment', {}).get('confidence', 'N/A')}
-
-## Gaps & Limitations
-
-"""
-                for gap in results.get('synthesis', {}).get('gaps', []):
-                    md += f"- {gap}\n"
-
-                md += """
-## Recommendations
-
-"""
-                for rec in results.get('synthesis', {}).get('recommendations', []):
-                    md += f"- {rec}\n"
-
-                md += """
-## Sources
-
-"""
-                for source in results.get('sources', []):
-                    md += f"- {source.get('url', 'N/A')}\n"
+                md = f"# {results['topic']}\n\n"
+                md += f"**Date:** {results['timestamp']}\n\n"
+                md += f"## Summary\n{results.get('synthesis', {}).get('executive_summary', 'N/A')}\n\n"
+                md += "## Findings\n"
+                for f in results.get('synthesis', {}).get('key_findings', []):
+                    md += f"- {f}\n"
 
                 st.download_button(
-                    "📝 Download Markdown",
+                    "📝 Markdown",
                     md,
-                    file_name=f"research_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
-                    mime="text/markdown",
+                    f"research_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+                    "text/markdown",
                     use_container_width=True
                 )
-
-            st.divider()
-
-            # Preview
-            st.markdown("### Preview")
-            preview_format = st.radio("Format", ["JSON", "Markdown"], horizontal=True)
-
-            if preview_format == "JSON":
-                st.json(results)
-            else:
-                st.markdown(md)
         else:
-            st.info("No results to export. Run a research query first.")
+            st.info("Run a research query first.")
 
 
 if __name__ == "__main__":
