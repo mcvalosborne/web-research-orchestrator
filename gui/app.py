@@ -120,14 +120,21 @@ def get_client():
     return anthropic.Anthropic(api_key=api_key)
 
 
-def log_agent_activity(agent_name: str, status: str, message: str):
+def log_agent_activity(agent_name: str, status: str, message: str, thread_safe: bool = False):
     """Log agent activity for visualization."""
-    st.session_state.agent_flow_log.append({
-        'timestamp': datetime.now().isoformat(),
-        'agent': agent_name,
-        'status': status,  # 'active', 'complete', 'failed'
-        'message': message
-    })
+    # Skip logging if called from a thread (session_state not available)
+    if thread_safe:
+        return
+    try:
+        if 'agent_flow_log' in st.session_state:
+            st.session_state.agent_flow_log.append({
+                'timestamp': datetime.now().isoformat(),
+                'agent': agent_name,
+                'status': status,  # 'active', 'complete', 'failed'
+                'message': message
+            })
+    except:
+        pass  # Silently fail if called from thread
 
 
 def render_agent_flow(container):
@@ -205,6 +212,42 @@ def brave_search(query: str, num_results: int = 10) -> list:
         return []
 
 
+def firecrawl_scrape_direct(url: str, api_key: str) -> dict:
+    """Scrape a URL using Firecrawl API (thread-safe version)."""
+    if not api_key:
+        return {'error': 'Firecrawl API key not set'}
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "url": url,
+            "formats": ["markdown"]
+        }
+        response = requests.post(
+            "https://api.firecrawl.dev/v1/scrape",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get('success'):
+            return {
+                'success': True,
+                'content': data.get('data', {}).get('markdown', ''),
+                'metadata': data.get('data', {}).get('metadata', {})
+            }
+        else:
+            return {'error': data.get('error', 'Unknown error')}
+
+    except Exception as e:
+        return {'error': str(e)}
+
+
 def firecrawl_scrape(url: str) -> dict:
     """Scrape a URL using Firecrawl API."""
     if not st.session_state.firecrawl_api_key:
@@ -243,16 +286,16 @@ def firecrawl_scrape(url: str) -> dict:
 
 # ============ Worker Functions ============
 
-def run_haiku_worker(client, url: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022", use_firecrawl: bool = False) -> dict:
+def run_haiku_worker(client, url: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022", use_firecrawl: bool = False, firecrawl_key: str = "") -> dict:
     """Run a worker to extract data from a URL."""
 
-    log_agent_activity(f"Worker-{worker_id}", "active", f"Fetching {url[:40]}...")
+    # Note: Can't log from threads, will log from main thread after completion
 
-    # Try Firecrawl first if enabled
+    # Try Firecrawl first if enabled (key passed from main thread)
     content_source = "direct"
     extra_content = ""
-    if use_firecrawl and st.session_state.firecrawl_api_key:
-        firecrawl_result = firecrawl_scrape(url)
+    if use_firecrawl and firecrawl_key:
+        firecrawl_result = firecrawl_scrape_direct(url, firecrawl_key)
         if firecrawl_result.get('success'):
             extra_content = f"\n\nSCRAPED CONTENT:\n{firecrawl_result.get('content', '')[:5000]}"
             content_source = "firecrawl"
@@ -295,13 +338,9 @@ Return only the JSON object, no other text."""
         result['_attempt'] = 1
         result['_source'] = content_source
 
-        status = "complete" if result['_success'] else "failed"
-        log_agent_activity(f"Worker-{worker_id}", status, f"{'✓' if result['_success'] else '✗'} {url[:40]}...")
-
         return result
 
     except json.JSONDecodeError:
-        log_agent_activity(f"Worker-{worker_id}", "failed", f"JSON parse error for {url[:40]}...")
         return {
             '_worker_id': worker_id,
             '_url': url,
@@ -311,7 +350,6 @@ Return only the JSON object, no other text."""
             'raw_response': result_text[:500] if 'result_text' in locals() else 'No response'
         }
     except Exception as e:
-        log_agent_activity(f"Worker-{worker_id}", "failed", f"Error: {str(e)[:50]}...")
         return {
             '_worker_id': worker_id,
             '_url': url,
@@ -453,7 +491,7 @@ Return only the JSON object."""
 def run_recovery_search_worker(client, query: str, topic: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022") -> dict:
     """Run a recovery worker that searches and extracts data using web search."""
 
-    log_agent_activity(f"Recovery-{worker_id}", "active", f"Searching: {query[:40]}...")
+    # Note: Can't log from threads
 
     prompt = f"""You are a research recovery worker. The direct website extraction failed, so you need to find the data through alternative means.
 
@@ -502,13 +540,9 @@ Return only the JSON object."""
         result['_success'] = result.get('confidence') in ['high', 'medium']
         result['_attempt'] = 2
 
-        status = "complete" if result['_success'] else "failed"
-        log_agent_activity(f"Recovery-{worker_id}", status, f"{'✓' if result['_success'] else '✗'} {query[:40]}...")
-
         return result
 
     except Exception as e:
-        log_agent_activity(f"Recovery-{worker_id}", "failed", f"Error: {str(e)[:50]}")
         return {
             '_worker_id': worker_id,
             '_recovery': True,
@@ -519,18 +553,18 @@ Return only the JSON object."""
         }
 
 
-def run_alternative_url_worker(client, url_info: dict, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022", use_firecrawl: bool = False) -> dict:
+def run_alternative_url_worker(client, url_info: dict, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022", use_firecrawl: bool = False, firecrawl_key: str = "") -> dict:
     """Try to extract from an alternative URL suggested by recovery strategy."""
 
     url = url_info.get('url', '')
     rationale = url_info.get('rationale', '')
 
-    log_agent_activity(f"Alt-Worker-{worker_id}", "active", f"Trying: {url[:40]}...")
+    # Note: Can't log from threads
 
-    # Try Firecrawl if enabled
+    # Try Firecrawl if enabled (key passed from main thread)
     extra_content = ""
-    if use_firecrawl and st.session_state.firecrawl_api_key:
-        firecrawl_result = firecrawl_scrape(url)
+    if use_firecrawl and firecrawl_key:
+        firecrawl_result = firecrawl_scrape_direct(url, firecrawl_key)
         if firecrawl_result.get('success'):
             extra_content = f"\n\nSCRAPED CONTENT:\n{firecrawl_result.get('content', '')[:5000]}"
 
@@ -585,13 +619,9 @@ Return only the JSON object."""
         result['_success'] = 'error' not in result
         result['_attempt'] = 2
 
-        status = "complete" if result['_success'] else "failed"
-        log_agent_activity(f"Alt-Worker-{worker_id}", status, f"{'✓' if result['_success'] else '✗'} {url[:40]}...")
-
         return result
 
     except Exception as e:
-        log_agent_activity(f"Alt-Worker-{worker_id}", "failed", f"Error: {str(e)[:50]}")
         return {
             '_worker_id': worker_id,
             '_url': url,
@@ -990,9 +1020,12 @@ def main():
                         progress_bar = st.progress(0)
                         extraction_results = []
 
+                        # Capture API key before entering thread pool (session_state not available in threads)
+                        firecrawl_key = st.session_state.firecrawl_api_key if use_firecrawl else ""
+
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = {
-                                executor.submit(run_haiku_worker, client, url, schema, i, worker_model, use_firecrawl): (i, url)
+                                executor.submit(run_haiku_worker, client, url, schema, i, worker_model, use_firecrawl, firecrawl_key): (i, url)
                                 for i, url in enumerate(urls)
                             }
 
@@ -1023,10 +1056,13 @@ def main():
                                 alt_urls = recovery_strategy.get('alternative_urls', [])[:5]
                                 queries = recovery_strategy.get('web_search_queries', [])[:5]
 
+                                # Capture API key before entering thread pool
+                                firecrawl_key = st.session_state.firecrawl_api_key if use_firecrawl else ""
+
                                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                                     futures = {}
                                     for i, url_info in enumerate(alt_urls):
-                                        futures[executor.submit(run_alternative_url_worker, client, url_info, schema, i, worker_model, use_firecrawl)] = i
+                                        futures[executor.submit(run_alternative_url_worker, client, url_info, schema, i, worker_model, use_firecrawl, firecrawl_key)] = i
                                     for i, query in enumerate(queries):
                                         futures[executor.submit(run_recovery_search_worker, client, query, topic, schema, len(alt_urls) + i, worker_model)] = i
 
