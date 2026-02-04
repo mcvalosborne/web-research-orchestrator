@@ -74,8 +74,8 @@ def get_client():
     return anthropic.Anthropic(api_key=api_key)
 
 
-def run_haiku_worker(client, url: str, schema: dict, worker_id: int) -> dict:
-    """Run a single Haiku worker to extract data from a URL."""
+def run_haiku_worker(client, url: str, schema: dict, worker_id: int, model: str = "claude-3-5-haiku-20241022") -> dict:
+    """Run a worker to extract data from a URL."""
     prompt = f"""You are a data extraction worker. Extract structured data from this URL.
 
 URL: {url}
@@ -94,7 +94,7 @@ Return only the JSON object, no other text."""
 
     try:
         response = client.messages.create(
-            model="claude-3-5-haiku-latest",
+            model=model,
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -130,7 +130,7 @@ Return only the JSON object, no other text."""
         }
 
 
-def run_discovery_search(client, topic: str, num_results: int = 10) -> list:
+def run_discovery_search(client, topic: str, num_results: int = 10, model: str = "claude-sonnet-4-20250514") -> list:
     """Use Claude to generate relevant search queries and find URLs."""
     prompt = f"""You are a research assistant. For the topic below, provide a list of {num_results} specific, real URLs that would be valuable sources for research.
 
@@ -151,7 +151,7 @@ Return only the JSON array, no other text."""
 
     try:
         response = client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model=model,
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -170,7 +170,7 @@ Return only the JSON array, no other text."""
         return []
 
 
-def synthesize_results(client, topic: str, results: list) -> dict:
+def synthesize_results(client, topic: str, results: list, model: str = "claude-sonnet-4-20250514") -> dict:
     """Use Sonnet to synthesize results into a final report."""
     prompt = f"""Synthesize these research results into a comprehensive summary.
 
@@ -196,7 +196,7 @@ Return as JSON:
 
     try:
         response = client.messages.create(
-            model="claude-3-5-sonnet-latest",
+            model=model,
             max_tokens=3000,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -242,12 +242,12 @@ def main():
         st.subheader("Models")
         orchestrator_model = st.selectbox(
             "Orchestrator",
-            ["claude-3-5-sonnet-latest", "claude-3-opus-latest"],
+            ["claude-sonnet-4-20250514", "claude-opus-4-5-20251101"],
             help="Model for planning and synthesis"
         )
         worker_model = st.selectbox(
             "Workers",
-            ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest"],
+            ["claude-3-5-haiku-20241022", "claude-sonnet-4-20250514"],
             help="Model for data extraction"
         )
 
@@ -347,8 +347,8 @@ def main():
                 # Phase 1: Discovery (if auto-discovery)
                 if research_type == "🔍 Auto-Discovery":
                     with st.status("🔍 Discovering sources...", expanded=True) as status:
-                        st.write("Using Sonnet to find relevant URLs...")
-                        discovered = run_discovery_search(client, topic, num_sources)
+                        st.write(f"Using {orchestrator_model.split('-')[1].title()} to find relevant URLs...")
+                        discovered = run_discovery_search(client, topic, num_sources, model=orchestrator_model)
                         urls = [d['url'] for d in discovered]
                         results['sources'] = discovered
 
@@ -372,7 +372,7 @@ def main():
 
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = {
-                                executor.submit(run_haiku_worker, client, url, schema, i): (i, url)
+                                executor.submit(run_haiku_worker, client, url, schema, i, model=worker_model): (i, url)
                                 for i, url in enumerate(urls)
                             }
 
@@ -395,8 +395,8 @@ def main():
 
                     # Phase 3: Synthesis
                     with st.status("🧠 Synthesizing results...", expanded=True) as status:
-                        st.write("Using Sonnet to analyze and synthesize findings...")
-                        synthesis = synthesize_results(client, topic, extraction_results)
+                        st.write(f"Using {orchestrator_model.split('-')[1].title()} to analyze and synthesize findings...")
+                        synthesis = synthesize_results(client, topic, extraction_results, model=orchestrator_model)
                         results['synthesis'] = synthesis
                         status.update(label="✓ Synthesis complete", state="complete")
 
