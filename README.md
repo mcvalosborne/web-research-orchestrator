@@ -18,13 +18,29 @@ By delegating URL fetching to Haiku workers instead of using Opus directly:
 
 ## Quick Start
 
-### For Claude Desktop App
+### Option 1: Streamlit GUI (Recommended)
+
+Run the visual interface:
+
+```bash
+cd gui
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Features:
+- 🔍 Auto-discover sources or use custom URLs
+- ⚡ Parallel Haiku workers with progress tracking
+- 📊 View results in tables
+- 📥 Export to JSON, CSV, or Markdown
+
+### Option 2: Claude Desktop App
 
 1. Download `SKILL.md`
 2. Open Claude Desktop → Skills → Upload a skill
 3. Select the file
 
-### For Claude Code (CLI)
+### Option 3: Claude Code (CLI)
 
 Copy the skill folder to your Claude skills directory:
 
@@ -44,12 +60,16 @@ Trigger the skill with prompts like:
 
 | File | Description |
 |------|-------------|
+| `gui/` | **Streamlit GUI application** |
+| `gui/app.py` | Main Streamlit app |
+| `gui/requirements.txt` | Python dependencies |
 | `SKILL.md` | Main skill file (uploadable to Claude Desktop) |
 | `docs/methodology.md` | Detailed methodology documentation |
 | `docs/setup.md` | MCP server setup instructions |
 | `prompts/extraction.md` | Data extraction prompt templates |
 | `prompts/discovery.md` | Source discovery prompt templates |
 | `prompts/synthesis.md` | Result synthesis prompt templates |
+| `prompts/workers.md` | Haiku worker prompt templates |
 | `examples/` | Worked examples for common use cases |
 | `schema.json` | JSON schema for research output |
 
