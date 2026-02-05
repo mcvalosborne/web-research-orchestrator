@@ -130,12 +130,17 @@ def get_secret(key: str, default: str = "") -> str:
 def check_password() -> bool:
     """Check if password protection is enabled and verify password."""
     # Check if password protection is configured
+    passwords = {}
     try:
-        passwords = st.secrets.get("passwords", {})
-        if not passwords:
-            return True  # No password protection configured
+        # Try to access passwords from secrets
+        if hasattr(st, 'secrets') and 'passwords' in st.secrets:
+            passwords = dict(st.secrets["passwords"])
     except Exception:
-        return True  # Secrets not available, skip password check
+        pass
+
+    # If no passwords configured, allow access (for local dev)
+    if not passwords:
+        return True
 
     # Initialize authentication state
     if "authenticated" not in st.session_state:
@@ -144,22 +149,30 @@ def check_password() -> bool:
     if st.session_state.authenticated:
         return True
 
-    # Show login form
-    st.markdown("### 🔐 Login Required")
-    st.markdown("This demo requires authentication.")
+    # Show login page with branding
+    st.markdown('<p class="main-header">🔬 Web Research Orchestrator</p>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Multi-model research with Claude</p>', unsafe_allow_html=True)
+    st.divider()
 
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login", type="primary")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("### 🔐 Login Required")
+        st.markdown("Enter your credentials to access the demo.")
 
-        if submitted:
-            if username in passwords and passwords[username] == password:
-                st.session_state.authenticated = True
-                st.session_state.username = username
-                st.rerun()
-            else:
-                st.error("Invalid username or password")
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
+
+            if submitted:
+                if username in passwords and passwords[username] == password:
+                    st.session_state.authenticated = True
+                    st.session_state.username = username
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password")
+
+        st.caption("Contact the administrator for access credentials.")
 
     return False
 
@@ -1184,46 +1197,47 @@ def main():
                 st.rerun()
             st.divider()
 
-        # API Keys Section - collapsed if pre-configured
-        with st.expander("🔑 API Keys", expanded=not api_key_from_secrets):
-            if api_key_from_secrets:
-                st.success("✓ API keys loaded from secrets")
+        # API Keys Section - only show if NOT pre-configured via secrets
+        if api_key_from_secrets:
+            # Just show status when using secrets
+            st.success("✅ API key configured")
+        else:
+            # Show full API key inputs for local development
+            with st.expander("🔑 API Keys", expanded=True):
+                api_key_input = st.text_input(
+                    "Anthropic API Key *",
+                    value=st.session_state.api_key,
+                    type="password",
+                    help="Required. Set ANTHROPIC_API_KEY env var to skip."
+                )
+                if api_key_input:
+                    st.session_state.api_key = api_key_input
 
-            api_key_input = st.text_input(
-                "Anthropic API Key *",
-                value=st.session_state.api_key,
-                type="password",
-                help="Required. Pre-configured via secrets." if api_key_from_secrets else "Required. Set ANTHROPIC_API_KEY env var to skip.",
-                disabled=api_key_from_secrets
-            )
-            if api_key_input:
-                st.session_state.api_key = api_key_input
+                st.divider()
 
-            st.divider()
+                brave_key_input = st.text_input(
+                    "Brave Search API Key",
+                    value=st.session_state.brave_api_key,
+                    type="password",
+                    help="Optional. Enables real web search. Get free key at brave.com/search/api/"
+                )
+                if brave_key_input:
+                    st.session_state.brave_api_key = brave_key_input
 
-            brave_key_input = st.text_input(
-                "Brave Search API Key",
-                value=st.session_state.brave_api_key,
-                type="password",
-                help="Optional. Enables real web search. Get free key at brave.com/search/api/"
-            )
-            if brave_key_input:
-                st.session_state.brave_api_key = brave_key_input
+                firecrawl_key_input = st.text_input(
+                    "Firecrawl API Key",
+                    value=st.session_state.firecrawl_api_key,
+                    type="password",
+                    help="Optional. Enables JS rendering & anti-bot bypass. Get free key at firecrawl.dev"
+                )
+                if firecrawl_key_input:
+                    st.session_state.firecrawl_api_key = firecrawl_key_input
 
-            firecrawl_key_input = st.text_input(
-                "Firecrawl API Key",
-                value=st.session_state.firecrawl_api_key,
-                type="password",
-                help="Optional. Enables JS rendering & anti-bot bypass. Get free key at firecrawl.dev"
-            )
-            if firecrawl_key_input:
-                st.session_state.firecrawl_api_key = firecrawl_key_input
-
-            # Show API status
-            st.caption("API Status:")
-            st.caption(f"{'✅' if st.session_state.api_key else '❌'} Anthropic (required)")
-            st.caption(f"{'✅' if st.session_state.brave_api_key else '⬜'} Brave Search (optional)")
-            st.caption(f"{'✅' if st.session_state.firecrawl_api_key else '⬜'} Firecrawl (optional)")
+                # Show API status
+                st.caption("API Status:")
+                st.caption(f"{'✅' if st.session_state.api_key else '❌'} Anthropic (required)")
+                st.caption(f"{'✅' if st.session_state.brave_api_key else '⬜'} Brave Search (optional)")
+                st.caption(f"{'✅' if st.session_state.firecrawl_api_key else '⬜'} Firecrawl (optional)")
 
         st.divider()
 
