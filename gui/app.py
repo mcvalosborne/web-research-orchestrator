@@ -115,6 +115,55 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def get_secret(key: str, default: str = "") -> str:
+    """Get a secret from Streamlit secrets or environment variables."""
+    # Try Streamlit secrets first (for cloud deployment)
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    # Fall back to environment variables (for local development)
+    return os.environ.get(key, default)
+
+
+def check_password() -> bool:
+    """Check if password protection is enabled and verify password."""
+    # Check if password protection is configured
+    try:
+        passwords = st.secrets.get("passwords", {})
+        if not passwords:
+            return True  # No password protection configured
+    except Exception:
+        return True  # Secrets not available, skip password check
+
+    # Initialize authentication state
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return True
+
+    # Show login form
+    st.markdown("### 🔐 Login Required")
+    st.markdown("This demo requires authentication.")
+
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login", type="primary")
+
+        if submitted:
+            if username in passwords and passwords[username] == password:
+                st.session_state.authenticated = True
+                st.session_state.username = username
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
+
+    return False
+
+
 def init_session_state():
     """Initialize session state variables."""
     if 'research_history' not in st.session_state:
@@ -122,11 +171,12 @@ def init_session_state():
     if 'current_results' not in st.session_state:
         st.session_state.current_results = None
     if 'api_key' not in st.session_state:
-        st.session_state.api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+        # Load from secrets first, then env vars
+        st.session_state.api_key = get_secret('ANTHROPIC_API_KEY', '')
     if 'brave_api_key' not in st.session_state:
-        st.session_state.brave_api_key = os.environ.get('BRAVE_API_KEY', '')
+        st.session_state.brave_api_key = get_secret('BRAVE_API_KEY', '')
     if 'firecrawl_api_key' not in st.session_state:
-        st.session_state.firecrawl_api_key = os.environ.get('FIRECRAWL_API_KEY', '')
+        st.session_state.firecrawl_api_key = get_secret('FIRECRAWL_API_KEY', '')
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     if 'agent_flow_log' not in st.session_state:
@@ -1109,22 +1159,42 @@ Answer questions about this research data. Be specific and cite the data when re
 def main():
     init_session_state()
 
+    # Check password protection (for cloud demos)
+    if not check_password():
+        return  # Stop here if not authenticated
+
     # Header
     st.markdown('<p class="main-header">🔬 Web Research Orchestrator</p>', unsafe_allow_html=True)
     st.markdown('<p class="subtitle">Multi-model research with automatic retry, analysis & visualization</p>', unsafe_allow_html=True)
     st.divider()
 
+    # Check if API key is pre-configured via secrets
+    api_key_from_secrets = bool(get_secret('ANTHROPIC_API_KEY', ''))
+
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Configuration")
 
-        # API Keys Section
-        with st.expander("🔑 API Keys", expanded=True):
+        # Show logged in user if authenticated
+        if st.session_state.get('authenticated') and st.session_state.get('username'):
+            st.caption(f"👤 Logged in as: {st.session_state.username}")
+            if st.button("Logout", type="secondary", use_container_width=True):
+                st.session_state.authenticated = False
+                st.session_state.username = None
+                st.rerun()
+            st.divider()
+
+        # API Keys Section - collapsed if pre-configured
+        with st.expander("🔑 API Keys", expanded=not api_key_from_secrets):
+            if api_key_from_secrets:
+                st.success("✓ API keys loaded from secrets")
+
             api_key_input = st.text_input(
                 "Anthropic API Key *",
                 value=st.session_state.api_key,
                 type="password",
-                help="Required. Set ANTHROPIC_API_KEY env var to skip."
+                help="Required. Pre-configured via secrets." if api_key_from_secrets else "Required. Set ANTHROPIC_API_KEY env var to skip.",
+                disabled=api_key_from_secrets
             )
             if api_key_input:
                 st.session_state.api_key = api_key_input

@@ -18,6 +18,19 @@ Thumbs.db
 **/secrets/
 **/credentials/
 
+# Streamlit secrets (NEVER commit)
+.streamlit/secrets.toml
+gui/.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
 # Temporary files
 *.tmp
 *.temp
