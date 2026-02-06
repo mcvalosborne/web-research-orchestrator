@@ -1,10 +1,5 @@
 """
-Web Research Orchestrator - Streamlit GUI
-A conversational interface for multi-model web research with Claude.
-
-Models used:
-- Claude Sonnet 4 (claude-sonnet-4-20250514): Orchestration, synthesis, analysis
-- Claude Haiku 3.5 (claude-3-5-haiku-20241022): Data extraction workers
+Web Research Orchestrator - Claude-style Chat Interface
 """
 
 import streamlit as st
@@ -13,180 +8,257 @@ import json
 import pandas as pd
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 import os
-import re
 
-# Import multi-strategy extraction module
+# Import extraction module
 try:
-    from extraction import (
-        MultiStrategyExtractor,
-        ExtractedData,
-        ValidationResult,
-        validate_extracted_data,
-        fetch_html_sync,
-    )
-    EXTRACTION_MODULE_AVAILABLE = True
+    from extraction import MultiStrategyExtractor, fetch_html_sync
+    EXTRACTION_AVAILABLE = True
 except ImportError:
-    EXTRACTION_MODULE_AVAILABLE = False
+    EXTRACTION_AVAILABLE = False
 
-# Page config
+# Page config - wide layout, no sidebar
 st.set_page_config(
-    page_title="Web Research Orchestrator",
+    page_title="Research Assistant",
     page_icon="🔬",
-    layout="wide",
+    layout="centered",
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for clean, modern look
+# Claude-style CSS
 st.markdown("""
 <style>
-    /* Main container */
-    .main-header {
-        font-size: 2rem;
-        font-weight: 700;
-        background: linear-gradient(90deg, #667eea, #764ba2);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0;
-        text-align: center;
-    }
-    .subtitle {
-        color: #666;
-        font-size: 1rem;
-        text-align: center;
-        margin-top: 0;
-        margin-bottom: 2rem;
-    }
-
-    /* Chat messages */
-    .user-message {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 1rem 1.5rem;
-        border-radius: 1rem 1rem 0.25rem 1rem;
-        margin: 0.5rem 0;
-        max-width: 80%;
-        margin-left: auto;
-    }
-    .assistant-message {
-        background: #f7f7f8;
-        color: #1a1a1a;
-        padding: 1rem 1.5rem;
-        border-radius: 1rem 1rem 1rem 0.25rem;
-        margin: 0.5rem 0;
-        max-width: 90%;
-        border: 1px solid #e5e5e5;
-    }
-
-    /* Progress indicators */
-    .thinking-box {
-        background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%);
-        border-left: 4px solid #667eea;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 1rem 0;
-    }
-    .step-indicator {
-        display: flex;
-        align-items: center;
-        padding: 0.5rem 0;
-        color: #555;
-    }
-    .step-indicator.active {
-        color: #667eea;
-        font-weight: 600;
-    }
-    .step-indicator.complete {
-        color: #22c55e;
-    }
-    .step-indicator.error {
-        color: #ef4444;
-    }
-
-    /* Results cards */
-    .result-card {
-        background: white;
-        border: 1px solid #e5e5e5;
-        border-radius: 0.75rem;
-        padding: 1.25rem;
-        margin: 0.75rem 0;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    .result-card:hover {
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    }
-
-    /* Cost badge */
-    .cost-badge {
-        background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
-        color: white;
-        padding: 0.5rem 1rem;
-        border-radius: 2rem;
-        font-size: 0.85rem;
-        display: inline-block;
-    }
-
-    /* Hide default Streamlit elements */
+    /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     .stDeployButton {display: none;}
+    header {visibility: hidden;}
 
-    /* Input styling */
-    .stTextInput > div > div > input {
+    /* Main container - Claude-like centered layout */
+    .main .block-container {
+        max-width: 48rem;
+        padding-top: 2rem;
+        padding-bottom: 6rem;
+    }
+
+    /* Header */
+    .header {
+        text-align: center;
+        padding: 1rem 0 2rem 0;
+        border-bottom: 1px solid #e5e5e5;
+        margin-bottom: 2rem;
+    }
+    .header h1 {
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: #1a1a1a;
+        margin: 0;
+    }
+    .header p {
+        color: #666;
+        font-size: 0.9rem;
+        margin: 0.5rem 0 0 0;
+    }
+
+    /* Chat messages */
+    .message {
+        padding: 1rem 0;
+        line-height: 1.6;
+    }
+    .message.user {
+        background: transparent;
+    }
+    .message.user .content {
+        background: #f4f4f4;
+        padding: 1rem 1.25rem;
         border-radius: 1.5rem;
-        padding: 0.75rem 1.25rem;
-        border: 2px solid #e5e5e5;
+        display: inline-block;
+        max-width: 85%;
+        float: right;
+        clear: both;
+    }
+    .message.assistant {
+        background: transparent;
+    }
+    .message.assistant .content {
+        color: #1a1a1a;
+    }
+    .message.assistant .avatar {
+        width: 28px;
+        height: 28px;
+        background: linear-gradient(135deg, #D4A574 0%, #C4956A 100%);
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+        margin-right: 0.75rem;
+        vertical-align: top;
+    }
+
+    /* Clear floats */
+    .clearfix::after {
+        content: "";
+        clear: both;
+        display: table;
+    }
+
+    /* Thinking/Progress */
+    .thinking {
+        color: #666;
+        font-style: italic;
+        padding: 0.5rem 0;
+    }
+    .thinking .dot {
+        animation: blink 1.4s infinite;
+    }
+    .thinking .dot:nth-child(2) { animation-delay: 0.2s; }
+    .thinking .dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes blink {
+        0%, 100% { opacity: 0.2; }
+        50% { opacity: 1; }
+    }
+
+    .step {
+        padding: 0.25rem 0;
+        color: #666;
+        font-size: 0.9rem;
+    }
+    .step.done {
+        color: #10a37f;
+    }
+    .step.active {
+        color: #1a1a1a;
+        font-weight: 500;
+    }
+
+    /* Results styling */
+    .finding {
+        padding: 0.75rem 0;
+        border-bottom: 1px solid #f0f0f0;
+    }
+    .finding:last-child {
+        border-bottom: none;
+    }
+
+    /* Input area - fixed at bottom */
+    .input-area {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: white;
+        border-top: 1px solid #e5e5e5;
+        padding: 1rem;
+        z-index: 100;
+    }
+    .input-container {
+        max-width: 48rem;
+        margin: 0 auto;
+    }
+
+    /* Style the text input to look like Claude's */
+    .stTextInput > div > div > input {
+        border: 1px solid #d9d9d9 !important;
+        border-radius: 1.5rem !important;
+        padding: 0.75rem 1.25rem !important;
+        font-size: 1rem !important;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
     }
     .stTextInput > div > div > input:focus {
-        border-color: #667eea;
-        box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+        border-color: #10a37f !important;
+        box-shadow: 0 0 0 1px #10a37f !important;
+    }
+
+    /* Example chips */
+    .examples {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        justify-content: center;
+        padding: 1rem 0;
+    }
+    .example-chip {
+        background: #f7f7f8;
+        border: 1px solid #e5e5e5;
+        border-radius: 1rem;
+        padding: 0.5rem 1rem;
+        font-size: 0.85rem;
+        color: #666;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .example-chip:hover {
+        background: #e5e5e5;
+        color: #1a1a1a;
+    }
+
+    /* Data table */
+    .dataframe {
+        font-size: 0.9rem !important;
+    }
+
+    /* Source pills */
+    .source-pill {
+        display: inline-block;
+        background: #f0f0f0;
+        padding: 0.25rem 0.75rem;
+        border-radius: 1rem;
+        font-size: 0.8rem;
+        color: #666;
+        margin: 0.25rem;
+    }
+    .source-pill.success {
+        background: #d1fae5;
+        color: #065f46;
+    }
+    .source-pill.failed {
+        background: #fee2e2;
+        color: #991b1b;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ============ Utility Functions ============
+# ============ Helper Functions ============
 
-def get_secret(key: str, default: str = "") -> str:
-    """Get a secret from Streamlit secrets or environment variables."""
+def get_secret(key, default=""):
     try:
         if hasattr(st, 'secrets') and key in st.secrets:
             return st.secrets[key]
-    except Exception:
+    except:
         pass
     return os.environ.get(key, default)
 
 
-def check_password() -> bool:
-    """Check password protection for cloud demos."""
+def check_password():
     passwords = {}
     try:
         if hasattr(st, 'secrets') and 'passwords' in st.secrets:
             passwords = dict(st.secrets["passwords"])
-    except Exception:
+    except:
         pass
 
     if not passwords:
         return True
 
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-
-    if st.session_state.authenticated:
+    if st.session_state.get('authenticated'):
         return True
 
-    # Login page
-    st.markdown('<p class="main-header">🔬 Web Research Orchestrator</p>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">AI-powered research assistant</p>', unsafe_allow_html=True)
+    # Login UI
+    st.markdown("""
+    <div class="header">
+        <h1>🔬 Research Assistant</h1>
+        <p>Sign in to continue</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns([1, 1.5, 1])
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown("### 🔐 Login")
         with st.form("login"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
-            if st.form_submit_button("Login", type="primary", use_container_width=True):
+            if st.form_submit_button("Continue", use_container_width=True, type="primary"):
                 if username in passwords and passwords[username] == password:
                     st.session_state.authenticated = True
                     st.session_state.username = username
@@ -196,21 +268,16 @@ def check_password() -> bool:
     return False
 
 
-def init_session_state():
-    """Initialize session state."""
-    defaults = {
-        'messages': [],
-        'current_research': None,
-        'api_key': get_secret('ANTHROPIC_API_KEY', ''),
-        'processing': False,
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+def init_state():
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+    if 'research' not in st.session_state:
+        st.session_state.research = None
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = get_secret('ANTHROPIC_API_KEY')
 
 
 def get_client():
-    """Get Anthropic client."""
     if not st.session_state.api_key:
         return None
     return anthropic.Anthropic(api_key=st.session_state.api_key)
@@ -218,490 +285,316 @@ def get_client():
 
 # ============ Research Functions ============
 
-def clarify_query(client, query: str) -> dict:
-    """Use Claude to understand the query and ask clarifying questions if needed."""
-    prompt = f"""You are a research assistant. Analyze this research request and determine if you need clarification.
+def understand_query(client, query):
+    """Parse and understand the research request."""
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": f"""Analyze this research request:
 
-USER REQUEST: {query}
+"{query}"
 
-Respond with JSON:
+Return JSON:
 {{
-    "understood": true/false,
-    "research_type": "pricing|comparison|data_extraction|competitive_intel|general",
-    "entities": ["list of companies/products/topics to research"],
-    "data_points": ["what specific data to extract"],
-    "clarifying_questions": ["questions if unclear, empty if understood"],
-    "suggested_schema": {{"field": "description"}},
-    "search_strategy": "brief description of how you'll approach this"
+    "clear": true/false,
+    "type": "pricing|comparison|features|general",
+    "subjects": ["what to research"],
+    "data_needed": ["specific data points"],
+    "clarification": "question to ask if unclear, or null",
+    "schema": {{"field": "what to extract"}}
 }}
 
-If the request is clear, set understood=true and provide your research plan.
-If unclear, set understood=false and ask 1-2 specific clarifying questions.
-
-Return only valid JSON."""
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = response.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return json.loads(text)
-    except Exception as e:
-        return {"understood": True, "error": str(e), "entities": [], "data_points": [], "clarifying_questions": []}
+Be helpful - if reasonably clear, set clear=true and proceed."""}]
+    )
+    text = response.content[0].text
+    if "```" in text:
+        text = text.split("```")[1].replace("json", "").strip()
+    return json.loads(text)
 
 
-def discover_sources(client, topic: str, entities: list, num_sources: int = 8) -> list:
-    """Find relevant URLs to research."""
-    prompt = f"""Find {num_sources} specific, real URLs for researching this topic.
+def find_sources(client, query, subjects):
+    """Find URLs to research."""
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": f"""Find 6-8 URLs for researching: {query}
+Subjects: {', '.join(subjects)}
 
-TOPIC: {topic}
-ENTITIES TO RESEARCH: {', '.join(entities) if entities else topic}
-
-Return JSON array:
-[{{"url": "https://...", "title": "...", "type": "official|news|comparison|docs", "priority": "high|medium"}}]
-
-Focus on official sources, reputable news, and comparison sites. Return only the JSON array."""
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = response.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return json.loads(text)
-    except Exception:
-        return []
+Return JSON array: [{{"url": "...", "title": "...", "type": "official|review|news"}}]
+Focus on official sites and reputable sources."""}]
+    )
+    text = response.content[0].text
+    if "```" in text:
+        text = text.split("```")[1].replace("json", "").strip()
+    return json.loads(text)
 
 
-def extract_from_url(client, url: str, schema: dict, topic: str) -> dict:
-    """Extract data from a single URL using multi-strategy approach."""
-    html_content = None
+def extract_data(client, url, schema, topic):
+    """Extract data from a URL."""
+    html = None
 
-    # Try to fetch HTML first (for CSS/regex extraction)
-    if EXTRACTION_MODULE_AVAILABLE:
+    # Try fast extraction first
+    if EXTRACTION_AVAILABLE:
         try:
-            html_content, _ = fetch_html_sync(url, timeout=10)
-            if html_content:
-                extractor = MultiStrategyExtractor(html_content, url)
+            html, _ = fetch_html_sync(url, timeout=8)
+            if html:
+                extractor = MultiStrategyExtractor(html, url)
                 result = extractor.extract_all(schema)
-                if result.confidence >= 0.6:
-                    data = result.data.copy()
-                    data['_url'] = url
-                    data['_method'] = result.extraction_method
-                    data['_confidence'] = result.confidence
-                    data['_success'] = True
-                    return data
-        except Exception:
+                if result.confidence >= 0.5:
+                    return {**result.data, '_url': url, '_method': 'fast', '_ok': True}
+        except:
             pass
 
-    # Fall back to LLM extraction
-    prompt = f"""Extract data from this URL for research on: {topic}
-
-URL: {url}
-{f'CONTENT: {html_content[:3000]}' if html_content else ''}
-
-SCHEMA: {json.dumps(schema)}
-
-Return JSON matching the schema. Use null for missing fields.
-If you cannot access the content, return {{"_error": "reason"}}"""
-
+    # LLM extraction
     try:
         response = client.messages.create(
             model="claude-3-5-haiku-20241022",
             max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": f"""Extract from {url} for: {topic}
+{f'Content: {html[:2500]}' if html else ''}
+Schema: {json.dumps(schema)}
+Return JSON. Use null for missing."""}]
         )
-        text = response.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
+        text = response.content[0].text
+        if "```" in text:
+            text = text.split("```")[1].replace("json", "").strip()
         data = json.loads(text)
-        data['_url'] = url
-        data['_method'] = 'llm'
-        data['_success'] = '_error' not in data
-        return data
+        return {**data, '_url': url, '_method': 'ai', '_ok': '_error' not in data}
     except Exception as e:
-        return {'_url': url, '_error': str(e), '_success': False}
+        return {'_url': url, '_error': str(e), '_ok': False}
 
 
-def synthesize_findings(client, topic: str, results: list) -> dict:
-    """Create a synthesis of all findings."""
-    successful = [r for r in results if r.get('_success')]
+def synthesize(client, query, results):
+    """Create synthesis of findings."""
+    good = [r for r in results if r.get('_ok')]
 
-    prompt = f"""Synthesize these research findings into a clear summary.
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": f"""Synthesize research on: {query}
 
-TOPIC: {topic}
-
-DATA COLLECTED ({len(successful)} sources):
-{json.dumps(successful, indent=2)}
-
-Create a synthesis with:
-1. Key findings (the most important discoveries)
-2. Comparison table if applicable
-3. Recommendations or insights
-4. Data gaps (what's missing)
+Data ({len(good)} sources):
+{json.dumps(good, indent=2)}
 
 Return JSON:
 {{
-    "summary": "2-3 sentence executive summary",
-    "key_findings": ["finding 1", "finding 2"],
-    "comparison_table": {{"headers": [...], "rows": [[...]]}},
-    "insights": ["insight 1"],
-    "gaps": ["what's missing"],
-    "confidence": "high|medium|low"
-}}"""
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = response.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return json.loads(text)
-    except Exception as e:
-        return {"summary": f"Error: {e}", "key_findings": [], "confidence": "low"}
+    "summary": "2-3 sentence summary",
+    "findings": ["key finding 1", "key finding 2"],
+    "table": {{"headers": ["Name", "Price", ...], "rows": [["A", "$10", ...], ...]}},
+    "recommendation": "brief recommendation if applicable"
+}}"""}]
+    )
+    text = response.content[0].text
+    if "```" in text:
+        text = text.split("```")[1].replace("json", "").strip()
+    return json.loads(text)
 
 
-def answer_followup(client, question: str, research_data: dict) -> str:
-    """Answer a follow-up question about the research."""
-    prompt = f"""Answer this follow-up question about the research data.
+def answer_question(client, question, research):
+    """Answer follow-up question."""
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": f"""Based on this research:
 
-RESEARCH TOPIC: {research_data.get('topic', 'Unknown')}
+Topic: {research.get('query')}
+Findings: {json.dumps(research.get('synthesis', {}))}
+Data: {json.dumps(research.get('results', [])[:3])}
 
-FINDINGS:
-{json.dumps(research_data.get('synthesis', {}), indent=2)}
+Answer: {question}
 
-RAW DATA:
-{json.dumps(research_data.get('results', [])[:5], indent=2)}
-
-QUESTION: {question}
-
-Provide a clear, concise answer based on the data. If the data doesn't contain the answer, say so."""
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text.strip()
-    except Exception as e:
-        return f"Sorry, I encountered an error: {e}"
-
-
-# ============ UI Components ============
-
-def render_thinking(steps: list, current_step: int):
-    """Render the thinking/progress indicator."""
-    html = '<div class="thinking-box">'
-    html += '<strong>🧠 Working on it...</strong><br><br>'
-
-    for i, step in enumerate(steps):
-        if i < current_step:
-            status = "complete"
-            icon = "✅"
-        elif i == current_step:
-            status = "active"
-            icon = "⏳"
-        else:
-            status = ""
-            icon = "⬜"
-        html += f'<div class="step-indicator {status}">{icon} {step}</div>'
-
-    html += '</div>'
-    return html
-
-
-def render_results_card(data: dict):
-    """Render a result as a nice card."""
-    url = data.get('_url', 'Unknown source')
-    method = data.get('_method', 'unknown')
-    success = data.get('_success', False)
-
-    # Clean data for display (remove internal fields)
-    display_data = {k: v for k, v in data.items() if not k.startswith('_') and v is not None}
-
-    status_icon = "✅" if success else "❌"
-    method_badge = f"{'🆓' if method in ['css', 'regex'] else '🤖'} {method}"
-
-    with st.container():
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.markdown(f"**{status_icon} {url[:60]}{'...' if len(url) > 60 else ''}**")
-        with col2:
-            st.caption(method_badge)
-
-        if display_data:
-            with st.expander("View data", expanded=False):
-                st.json(display_data)
-
-
-def render_synthesis(synthesis: dict):
-    """Render the synthesis in a nice format."""
-    st.markdown("### 📊 Research Summary")
-
-    # Summary
-    if synthesis.get('summary'):
-        st.info(synthesis['summary'])
-
-    # Key findings
-    if synthesis.get('key_findings'):
-        st.markdown("**Key Findings:**")
-        for finding in synthesis['key_findings']:
-            st.markdown(f"• {finding}")
-
-    # Comparison table
-    if synthesis.get('comparison_table'):
-        table = synthesis['comparison_table']
-        if table.get('headers') and table.get('rows'):
-            st.markdown("**Comparison:**")
-            df = pd.DataFrame(table['rows'], columns=table['headers'])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-    # Insights
-    if synthesis.get('insights'):
-        st.markdown("**💡 Insights:**")
-        for insight in synthesis['insights']:
-            st.markdown(f"• {insight}")
-
-    # Confidence
-    confidence = synthesis.get('confidence', 'medium')
-    confidence_colors = {'high': '🟢', 'medium': '🟡', 'low': '🔴'}
-    st.caption(f"Confidence: {confidence_colors.get(confidence, '⚪')} {confidence}")
-
-
-# ============ Main Research Flow ============
-
-def run_research(query: str, progress_container):
-    """Execute the full research flow with live progress."""
-    client = get_client()
-    if not client:
-        st.error("API key not configured")
-        return None
-
-    steps = [
-        "Understanding your request",
-        "Finding relevant sources",
-        "Extracting data",
-        "Analyzing findings",
-        "Preparing summary"
-    ]
-
-    research_data = {
-        'topic': query,
-        'timestamp': datetime.now().isoformat(),
-        'results': [],
-        'synthesis': None,
-    }
-
-    # Step 1: Understand query
-    with progress_container:
-        st.markdown(render_thinking(steps, 0), unsafe_allow_html=True)
-
-    clarification = clarify_query(client, query)
-
-    # Check if we need clarification
-    if not clarification.get('understood', True) and clarification.get('clarifying_questions'):
-        return {'needs_clarification': True, 'questions': clarification['clarifying_questions'], 'partial': clarification}
-
-    schema = clarification.get('suggested_schema', {"name": "Name", "details": "Key details"})
-    entities = clarification.get('entities', [])
-
-    # Step 2: Find sources
-    with progress_container:
-        st.markdown(render_thinking(steps, 1), unsafe_allow_html=True)
-        st.caption(f"Strategy: {clarification.get('search_strategy', 'General search')}")
-
-    sources = discover_sources(client, query, entities)
-    research_data['sources'] = sources
-
-    if not sources:
-        return {'error': 'Could not find relevant sources'}
-
-    # Step 3: Extract data
-    with progress_container:
-        st.markdown(render_thinking(steps, 2), unsafe_allow_html=True)
-        extraction_status = st.empty()
-
-    results = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(extract_from_url, client, s['url'], schema, query): s for s in sources}
-        completed = 0
-        for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
-            completed += 1
-            extraction_status.caption(f"Processed {completed}/{len(sources)} sources...")
-
-    research_data['results'] = results
-    successful = sum(1 for r in results if r.get('_success'))
-
-    # Step 4: Analyze
-    with progress_container:
-        st.markdown(render_thinking(steps, 3), unsafe_allow_html=True)
-        st.caption(f"Analyzing {successful} successful extractions...")
-
-    # Step 5: Synthesize
-    with progress_container:
-        st.markdown(render_thinking(steps, 4), unsafe_allow_html=True)
-
-    synthesis = synthesize_findings(client, query, results)
-    research_data['synthesis'] = synthesis
-
-    return research_data
+Be concise and specific. Reference the data."""}]
+    )
+    return response.content[0].text
 
 
 # ============ Main App ============
 
 def main():
-    init_session_state()
+    init_state()
 
     if not check_password():
         return
 
     # Header
-    st.markdown('<p class="main-header">🔬 Web Research Orchestrator</p>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Ask me to research anything • Powered by Claude Sonnet & Haiku</p>', unsafe_allow_html=True)
+    st.markdown("""
+    <div class="header">
+        <h1>🔬 Research Assistant</h1>
+        <p>Ask me to research anything</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # Sidebar (collapsed by default)
-    with st.sidebar:
-        st.markdown("### ⚙️ Settings")
+    # Settings in expander (not sidebar)
+    if not get_secret('ANTHROPIC_API_KEY'):
+        with st.expander("⚙️ Settings"):
+            key = st.text_input("API Key", type="password")
+            if key:
+                st.session_state.api_key = key
 
-        if get_secret('ANTHROPIC_API_KEY'):
-            st.success("✅ API configured")
+    # Chat history
+    for msg in st.session_state.messages:
+        if msg['role'] == 'user':
+            st.markdown(f"""
+            <div class="message user clearfix">
+                <div class="content">{msg['content']}</div>
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            api_key = st.text_input("Anthropic API Key", type="password")
-            if api_key:
-                st.session_state.api_key = api_key
+            st.markdown(f"""
+            <div class="message assistant">
+                <span class="avatar">🔬</span>
+                <span class="content">{msg['content']}</span>
+            </div>
+            """, unsafe_allow_html=True)
 
-        st.divider()
-        st.caption("**Models:**")
-        st.caption("• Sonnet 4 - Planning & synthesis")
-        st.caption("• Haiku 3.5 - Data extraction")
+            # Show research results if present
+            if msg.get('research'):
+                research = msg['research']
+                synthesis = research.get('synthesis', {})
 
-        st.divider()
-        if st.button("🗑️ Clear conversation", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.current_research = None
+                # Summary
+                if synthesis.get('summary'):
+                    st.info(synthesis['summary'])
+
+                # Table
+                if synthesis.get('table'):
+                    table = synthesis['table']
+                    if table.get('headers') and table.get('rows'):
+                        df = pd.DataFrame(table['rows'], columns=table['headers'])
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+
+                # Findings
+                if synthesis.get('findings'):
+                    for f in synthesis['findings']:
+                        st.markdown(f"• {f}")
+
+                # Recommendation
+                if synthesis.get('recommendation'):
+                    st.success(f"💡 {synthesis['recommendation']}")
+
+                # Sources
+                results = research.get('results', [])
+                if results:
+                    with st.expander(f"📚 Sources ({sum(1 for r in results if r.get('_ok'))}/{len(results)} successful)"):
+                        for r in results:
+                            status = "success" if r.get('_ok') else "failed"
+                            url = r.get('_url', 'Unknown')[:50]
+                            st.markdown(f'<span class="source-pill {status}">{url}</span>', unsafe_allow_html=True)
+
+    # Show examples if no messages
+    if not st.session_state.messages:
+        st.markdown("#### Try asking:")
+        cols = st.columns(2)
+        examples = [
+            "Compare pricing for Notion vs Obsidian vs Roam",
+            "Research top 5 CRM tools for startups",
+            "Find features of popular email marketing tools",
+            "Compare project management software pricing"
+        ]
+        for i, ex in enumerate(examples):
+            with cols[i % 2]:
+                if st.button(ex, key=f"ex_{i}", use_container_width=True):
+                    st.session_state.pending_query = ex
+                    st.rerun()
+
+    # Input
+    st.markdown("<br>", unsafe_allow_html=True)
+    query = st.chat_input("Ask me to research something...")
+
+    # Check for pending query from examples
+    if hasattr(st.session_state, 'pending_query'):
+        query = st.session_state.pending_query
+        del st.session_state.pending_query
+
+    if query:
+        # Add user message
+        st.session_state.messages.append({'role': 'user', 'content': query})
+
+        client = get_client()
+        if not client:
+            st.session_state.messages.append({
+                'role': 'assistant',
+                'content': "Please add your Anthropic API key in Settings to continue."
+            })
             st.rerun()
 
-        if st.session_state.get('authenticated'):
-            st.divider()
-            st.caption(f"👤 {st.session_state.get('username', 'User')}")
-            if st.button("Logout", use_container_width=True):
-                st.session_state.authenticated = False
-                st.rerun()
-
-    # Main chat area
-    chat_container = st.container()
-
-    # Display message history
-    with chat_container:
-        for msg in st.session_state.messages:
-            if msg['role'] == 'user':
-                st.markdown(f'<div class="user-message">{msg["content"]}</div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="assistant-message">{msg["content"]}</div>', unsafe_allow_html=True)
-
-                # If there's research data, show it
-                if msg.get('research_data') and msg['research_data'].get('synthesis'):
-                    render_synthesis(msg['research_data']['synthesis'])
-
-                    with st.expander("📋 View all sources", expanded=False):
-                        for result in msg['research_data'].get('results', []):
-                            render_results_card(result)
-
-    # Input area
-    st.divider()
-
-    col1, col2 = st.columns([6, 1])
-    with col1:
-        user_input = st.text_input(
-            "Ask me to research something...",
-            placeholder="e.g., Compare pricing for top 5 project management tools",
-            label_visibility="collapsed",
-            key="user_input"
-        )
-    with col2:
-        send_clicked = st.button("🔍", type="primary", use_container_width=True)
-
-    # Example prompts for new users
-    if not st.session_state.messages:
-        st.markdown("**Try asking:**")
-        examples = [
-            "Compare pricing for Notion, Obsidian, and Roam Research",
-            "Research the top 5 CRM tools for small businesses",
-            "Find pricing and features for popular email marketing platforms",
-        ]
-        cols = st.columns(len(examples))
-        for i, example in enumerate(examples):
-            with cols[i]:
-                if st.button(example, key=f"example_{i}", use_container_width=True):
-                    user_input = example
-                    send_clicked = True
-
-    # Process input
-    if (send_clicked or user_input) and user_input and not st.session_state.processing:
-        st.session_state.processing = True
-
-        # Add user message
-        st.session_state.messages.append({'role': 'user', 'content': user_input})
-
-        # Check if this is a follow-up question
-        if st.session_state.current_research and any(word in user_input.lower() for word in ['which', 'what', 'how', 'why', 'tell me', 'more about', 'compare']):
-            # It's a follow-up
+        # Check if follow-up question
+        if st.session_state.research and len(query.split()) < 15:
             with st.spinner("Thinking..."):
-                answer = answer_followup(get_client(), user_input, st.session_state.current_research)
+                answer = answer_question(client, query, st.session_state.research)
             st.session_state.messages.append({'role': 'assistant', 'content': answer})
-        else:
-            # New research query
-            progress_container = st.empty()
+            st.rerun()
 
-            with progress_container.container():
-                result = run_research(user_input, st)
+        # New research
+        progress = st.empty()
 
-            progress_container.empty()
+        # Step 1: Understand
+        progress.markdown("*Understanding your request...*")
+        try:
+            parsed = understand_query(client, query)
+        except:
+            parsed = {'clear': True, 'subjects': [query], 'schema': {'name': 'Name', 'details': 'Details'}}
 
-            if result:
-                if result.get('needs_clarification'):
-                    # Ask clarifying questions
-                    questions = result['questions']
-                    response = "I want to make sure I understand your request. " + " ".join(questions)
-                    st.session_state.messages.append({'role': 'assistant', 'content': response})
-                elif result.get('error'):
-                    st.session_state.messages.append({'role': 'assistant', 'content': f"Sorry, I ran into an issue: {result['error']}"})
-                else:
-                    # Success!
-                    st.session_state.current_research = result
-                    summary = result.get('synthesis', {}).get('summary', 'Research complete!')
-                    successful = sum(1 for r in result.get('results', []) if r.get('_success'))
-                    total = len(result.get('results', []))
+        if not parsed.get('clear') and parsed.get('clarification'):
+            st.session_state.messages.append({
+                'role': 'assistant',
+                'content': parsed['clarification']
+            })
+            progress.empty()
+            st.rerun()
 
-                    response = f"✅ **Research complete!** Analyzed {successful}/{total} sources.\n\n{summary}"
-                    st.session_state.messages.append({
-                        'role': 'assistant',
-                        'content': response,
-                        'research_data': result
-                    })
+        # Step 2: Find sources
+        progress.markdown("*Finding sources...*")
+        try:
+            sources = find_sources(client, query, parsed.get('subjects', [query]))
+        except:
+            sources = []
 
-        st.session_state.processing = False
+        if not sources:
+            st.session_state.messages.append({
+                'role': 'assistant',
+                'content': "I couldn't find relevant sources for that query. Could you try rephrasing?"
+            })
+            progress.empty()
+            st.rerun()
+
+        # Step 3: Extract
+        progress.markdown(f"*Researching {len(sources)} sources...*")
+        schema = parsed.get('schema', {'name': 'Name', 'info': 'Key information'})
+
+        results = []
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futures = {ex.submit(extract_data, client, s['url'], schema, query): s for s in sources}
+            for future in as_completed(futures):
+                results.append(future.result())
+                progress.markdown(f"*Researching {len(sources)} sources... ({len(results)}/{len(sources)})*")
+
+        # Step 4: Synthesize
+        progress.markdown("*Analyzing findings...*")
+        try:
+            synthesis = synthesize(client, query, results)
+        except Exception as e:
+            synthesis = {'summary': f'Completed research with {sum(1 for r in results if r.get("_ok"))} sources.', 'findings': []}
+
+        progress.empty()
+
+        # Save research
+        research_data = {
+            'query': query,
+            'results': results,
+            'synthesis': synthesis,
+            'timestamp': datetime.now().isoformat()
+        }
+        st.session_state.research = research_data
+
+        # Add response
+        successful = sum(1 for r in results if r.get('_ok'))
+        st.session_state.messages.append({
+            'role': 'assistant',
+            'content': f"Here's what I found ({successful} sources analyzed):",
+            'research': research_data
+        })
+
         st.rerun()
 
 
