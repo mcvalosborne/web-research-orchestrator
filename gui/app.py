@@ -302,7 +302,7 @@ Requirements:
         return {
             'text': text_content,
             'sources': unique_sources[:10],  # Top 10 sources
-            'search_count': response.usage.server_tool_use.get('web_search_requests', 0) if hasattr(response.usage, 'server_tool_use') else 0,
+            'search_count': getattr(response.usage.server_tool_use, 'web_search_requests', 0) if hasattr(response.usage, 'server_tool_use') else 0,
             'input_tokens': response.usage.input_tokens,
             'output_tokens': response.usage.output_tokens,
             'success': True
