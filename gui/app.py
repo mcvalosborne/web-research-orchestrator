@@ -454,15 +454,15 @@ Use real URLs that actually exist. Prioritize official sites and reputable sourc
     return unique[:8]
 
 
-def extract_from_source(client, source, schema, topic):
-    """Extract data from a single source with caching."""
+def extract_from_source(client, source, schema, topic, cache_dict):
+    """Extract data from a single source. Thread-safe version."""
     url = source["url"]
-
-    # Check cache
     ck = cache_key(url)
-    if ck in st.session_state.cache:
-        cached = st.session_state.cache[ck]
-        return {**cached, '_url': url, '_cached': True, '_ok': True}
+
+    # Check cache (passed as parameter for thread safety)
+    if ck in cache_dict:
+        cached = cache_dict[ck]
+        return {**cached, '_url': url, '_cached': True, '_ok': True, '_cache_key': ck}
 
     content = None
     method = "unknown"
@@ -481,8 +481,7 @@ def extract_from_source(client, source, schema, topic):
                 extractor = MultiStrategyExtractor(html, url)
                 result = extractor.extract_all(schema)
                 if result.confidence >= 0.5:
-                    st.session_state.cache[ck] = result.data
-                    return {**result.data, '_url': url, '_method': 'css/regex', '_confidence': result.confidence, '_ok': True}
+                    return {**result.data, '_url': url, '_method': 'css/regex', '_confidence': result.confidence, '_ok': True, '_cache_key': ck, '_cache_data': result.data}
                 content = html[:4000]
                 method = "html"
         except:
@@ -505,7 +504,13 @@ Return ONLY a valid JSON object. Use null for fields you cannot find."""
             max_tokens=1500,
             messages=[{"role": "user", "content": prompt}]
         )
-        track_cost(MODELS["extractor"], response.usage.input_tokens, response.usage.output_tokens)
+
+        # Return cost info for tracking in main thread
+        cost_info = {
+            'model': MODELS["extractor"],
+            'input_tokens': response.usage.input_tokens,
+            'output_tokens': response.usage.output_tokens
+        }
 
         text = response.content[0].text.strip()
         if "```" in text:
@@ -519,8 +524,7 @@ Return ONLY a valid JSON object. Use null for fields you cannot find."""
                 text = text[start:]
 
         data = json.loads(text)
-        st.session_state.cache[ck] = data
-        return {**data, '_url': url, '_method': method or 'llm', '_ok': True}
+        return {**data, '_url': url, '_method': method or 'llm', '_ok': True, '_cache_key': ck, '_cache_data': data, '_cost': cost_info}
 
     except Exception as e:
         return {'_url': url, '_error': str(e)[:100], '_ok': False}
@@ -856,12 +860,24 @@ def main():
         progress.markdown(render_progress(steps, 2), unsafe_allow_html=True)
         schema = parsed.get('schema', {'name': 'Name', 'info': 'Key information'})
 
+        # Get cache snapshot for thread-safe access
+        cache_snapshot = dict(st.session_state.cache)
+
         results = []
         with ThreadPoolExecutor(max_workers=4) as ex:
-            futures = {ex.submit(extract_from_source, client, s, schema, query): s for s in sources}
+            futures = {ex.submit(extract_from_source, client, s, schema, query, cache_snapshot): s for s in sources}
             done_count = 0
             for future in as_completed(futures):
-                results.append(future.result())
+                result = future.result()
+                results.append(result)
+
+                # Update cache and costs in main thread
+                if result.get('_cache_key') and result.get('_cache_data'):
+                    st.session_state.cache[result['_cache_key']] = result['_cache_data']
+                if result.get('_cost'):
+                    cost = result['_cost']
+                    track_cost(cost['model'], cost['input_tokens'], cost['output_tokens'])
+
                 done_count += 1
                 progress.markdown(
                     render_progress(steps, 2) + f'<p style="font-size:0.8rem;color:#666;margin-left:2rem;">({done_count}/{len(sources)} sources)</p>',
