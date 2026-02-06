@@ -3,19 +3,29 @@ Web Research Orchestrator - Claude-style Chat Interface
 """
 
 import streamlit as st
-import anthropic
 import json
-import pandas as pd
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 
-# Import extraction module
+# Core imports with error handling
+try:
+    import anthropic
+    import pandas as pd
+    from datetime import datetime
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+except ImportError as e:
+    st.error(f"Missing dependency: {e}. Please check requirements.txt")
+    st.stop()
+
+# Import extraction module (optional)
+EXTRACTION_AVAILABLE = False
 try:
     from extraction import MultiStrategyExtractor, fetch_html_sync
     EXTRACTION_AVAILABLE = True
 except ImportError:
-    EXTRACTION_AVAILABLE = False
+    pass
+except Exception as e:
+    # Log but don't fail
+    pass
 
 # Page config - wide layout, no sidebar
 st.set_page_config(

@@ -13,7 +13,15 @@ import re
 import json
 from typing import Any, Optional
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, Field, field_validator, ValidationError
+try:
+    from pydantic import BaseModel, Field, field_validator, ValidationError
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    # Fallback for older pydantic
+    from pydantic import BaseModel, Field, validator as field_validator, ValidationError
+    PYDANTIC_AVAILABLE = True
+except:
+    PYDANTIC_AVAILABLE = False
 from datetime import datetime
 import httpx
 
@@ -165,7 +173,14 @@ class MultiStrategyExtractor:
     def __init__(self, html_content: str, url: str):
         self.html = html_content
         self.url = url
-        self.soup = BeautifulSoup(html_content, 'lxml') if html_content else None
+        # Try lxml first, fall back to html.parser
+        if html_content:
+            try:
+                self.soup = BeautifulSoup(html_content, 'lxml')
+            except:
+                self.soup = BeautifulSoup(html_content, 'html.parser')
+        else:
+            self.soup = None
         self.extraction_log = []
 
     def extract_with_css(self, field_name: str) -> tuple[Optional[str], float]:
