@@ -612,7 +612,7 @@ def render_header():
     ''', unsafe_allow_html=True)
 
 
-def render_message(msg):
+def render_message(msg, msg_idx=0):
     """Render a chat message."""
     if msg['role'] == 'user':
         st.markdown(f'<div class="user-msg">{msg["content"]}</div>', unsafe_allow_html=True)
@@ -621,12 +621,14 @@ def render_message(msg):
 
         # Render research results if present
         if msg.get('research'):
-            render_research_results(msg['research'])
+            render_research_results(msg['research'], msg_idx)
 
 
-def render_research_results(research):
-    """Render research results."""
+def render_research_results(research, msg_idx=0):
+    """Render research results with unique keys."""
     synthesis = research.get('synthesis', {})
+    # Create unique key prefix from timestamp or index
+    key_prefix = research.get('timestamp', str(msg_idx))[:20].replace(':', '').replace('-', '')
     results = research.get('results', [])
 
     # Summary
@@ -673,9 +675,10 @@ def render_research_results(research):
         st.download_button(
             "📥 JSON",
             json_data,
-            file_name=f"research_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            file_name=f"research_{key_prefix}.json",
             mime="application/json",
-            use_container_width=True
+            use_container_width=True,
+            key=f"dl_json_{key_prefix}"
         )
     with col2:
         csv_data = export_to_csv(research)
@@ -683,18 +686,19 @@ def render_research_results(research):
             st.download_button(
                 "📥 CSV",
                 csv_data,
-                file_name=f"research_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                file_name=f"research_{key_prefix}.csv",
                 mime="text/csv",
-                use_container_width=True
+                use_container_width=True,
+                key=f"dl_csv_{key_prefix}"
             )
 
     # Follow-up suggestions
     if synthesis.get('follow_up_questions'):
         st.markdown("**Suggested follow-ups:**")
-        cols = st.columns(len(synthesis['follow_up_questions']))
+        cols = st.columns(min(3, len(synthesis['follow_up_questions'])))
         for i, q in enumerate(synthesis['follow_up_questions'][:3]):
             with cols[i]:
-                if st.button(q[:40] + "...", key=f"followup_{i}_{hash(q)}", use_container_width=True):
+                if st.button(q[:40] + "...", key=f"followup_{key_prefix}_{i}", use_container_width=True):
                     st.session_state.pending_query = q
                     st.rerun()
 
@@ -772,8 +776,8 @@ def main():
             st.rerun()
 
     # Chat history
-    for msg in st.session_state.messages:
-        render_message(msg)
+    for idx, msg in enumerate(st.session_state.messages):
+        render_message(msg, idx)
 
     # Example prompts if empty
     if not st.session_state.messages:
