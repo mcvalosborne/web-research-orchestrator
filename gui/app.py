@@ -1,15 +1,14 @@
 """
-Web Research Orchestrator - Enhanced Edition
-Features: Brave Search, Firecrawl, streaming, export, history, caching, cost tracking
+Web Research Orchestrator - Claude Web Search Edition
+Primary: Claude's built-in web search for grounded, cited answers
+Backup: Brave Search + Firecrawl for deep extraction
 """
 
 import streamlit as st
 import json
 import os
 import hashlib
-import time
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Core imports
 try:
@@ -20,26 +19,14 @@ except ImportError as e:
     st.error(f"Missing dependency: {e}")
     st.stop()
 
-# Optional extraction module
-EXTRACTION_AVAILABLE = False
-try:
-    from extraction import MultiStrategyExtractor, fetch_html_sync
-    EXTRACTION_AVAILABLE = True
-except:
-    pass
-
 # ============ Configuration ============
 
-MODELS = {
-    "planner": "claude-sonnet-4-20250514",
-    "extractor": "claude-haiku-4-5-20251001",
-    "synthesizer": "claude-sonnet-4-20250514"
-}
+MODEL = "claude-sonnet-4-20250514"
+WEB_SEARCH_BETA = "web-search-2025-03-05"
 
-# Cost per 1M tokens (approximate)
+# Cost per 1M tokens
 COSTS = {
     "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
-    "claude-haiku-4-5-20251001": {"input": 0.25, "output": 1.25},
 }
 
 # ============ Page Config ============
@@ -62,7 +49,6 @@ st.markdown("""
         padding: 1rem 1rem 8rem 1rem;
     }
 
-    /* Header */
     .app-header {
         text-align: center;
         padding: 1.5rem 0;
@@ -83,7 +69,6 @@ st.markdown("""
         font-size: 0.95rem;
     }
 
-    /* Status badges */
     .status-bar {
         display: flex;
         gap: 0.5rem;
@@ -103,7 +88,6 @@ st.markdown("""
         color: #065f46;
     }
 
-    /* Messages */
     .user-msg {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
@@ -116,49 +100,54 @@ st.markdown("""
 
     .assistant-msg {
         padding: 0.5rem 0;
+        line-height: 1.7;
     }
 
-    /* Progress */
-    .progress-container {
-        background: #f8f9fa;
-        border-radius: 0.75rem;
+    .citation {
+        display: inline-block;
+        background: #e8f4f8;
+        color: #0369a1;
+        padding: 0.1rem 0.4rem;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        text-decoration: none;
+        margin: 0 0.1rem;
+    }
+    .citation:hover {
+        background: #0369a1;
+        color: white;
+    }
+
+    .sources-list {
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 0.5rem;
         padding: 1rem;
         margin: 1rem 0;
     }
-    .progress-step {
-        display: flex;
-        align-items: center;
-        padding: 0.4rem 0;
-        color: #666;
+    .source-item {
+        padding: 0.5rem 0;
+        border-bottom: 1px solid #e2e8f0;
         font-size: 0.9rem;
     }
-    .progress-step.active {
-        color: #1a1a1a;
+    .source-item:last-child {
+        border-bottom: none;
+    }
+    .source-item a {
+        color: #0369a1;
+        text-decoration: none;
+    }
+    .source-item a:hover {
+        text-decoration: underline;
+    }
+    .source-title {
         font-weight: 500;
     }
-    .progress-step.done {
-        color: #059669;
-    }
-    .progress-step .icon {
-        width: 1.5rem;
-        margin-right: 0.5rem;
+    .source-url {
+        color: #64748b;
+        font-size: 0.8rem;
     }
 
-    /* Results card */
-    .results-card {
-        background: white;
-        border: 1px solid #e5e5e5;
-        border-radius: 0.75rem;
-        padding: 1.25rem;
-        margin: 1rem 0;
-    }
-    .results-card h3 {
-        margin: 0 0 0.75rem 0;
-        font-size: 1rem;
-        color: #1a1a1a;
-    }
-
-    /* Cost tracker */
     .cost-badge {
         position: fixed;
         bottom: 5rem;
@@ -173,31 +162,10 @@ st.markdown("""
         z-index: 100;
     }
 
-    /* Source pills */
-    .source-pill {
-        display: inline-block;
-        padding: 0.25rem 0.6rem;
-        border-radius: 0.75rem;
-        font-size: 0.75rem;
-        margin: 0.2rem;
-        text-decoration: none;
-    }
-    .source-pill.high { background: #d1fae5; color: #065f46; }
-    .source-pill.medium { background: #fef3c7; color: #92400e; }
-    .source-pill.low { background: #fee2e2; color: #991b1b; }
-
-    /* Follow-up chips */
-    .followup-chips {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem;
-        margin-top: 1rem;
-    }
-
-    /* Dataframe styling */
-    .stDataFrame {
-        border: 1px solid #e5e5e5;
-        border-radius: 0.5rem;
+    .thinking {
+        color: #666;
+        font-style: italic;
+        padding: 0.5rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -206,7 +174,6 @@ st.markdown("""
 # ============ Helper Functions ============
 
 def get_secret(key, default=""):
-    """Get secret from Streamlit secrets or environment."""
     try:
         if hasattr(st, 'secrets') and key in st.secrets:
             return st.secrets[key]
@@ -216,7 +183,6 @@ def get_secret(key, default=""):
 
 
 def check_password():
-    """Simple password protection."""
     passwords = {}
     try:
         if hasattr(st, 'secrets') and 'passwords' in st.secrets:
@@ -247,11 +213,9 @@ def check_password():
 
 
 def init_state():
-    """Initialize session state."""
     defaults = {
         'messages': [],
         'history': [],
-        'cache': {},
         'total_cost': 0.0,
         'session_cost': 0.0,
     }
@@ -261,363 +225,162 @@ def init_state():
 
 
 def get_client():
-    """Get Anthropic client."""
     key = get_secret('ANTHROPIC_API_KEY')
     if not key:
         return None
     return anthropic.Anthropic(api_key=key)
 
 
-def cache_key(url):
-    """Generate cache key for URL."""
-    return hashlib.md5(url.encode()).hexdigest()
+def track_cost(input_tokens, output_tokens):
+    cost = (input_tokens * COSTS[MODEL]["input"] + output_tokens * COSTS[MODEL]["output"]) / 1_000_000
+    st.session_state.session_cost += cost
+    st.session_state.total_cost += cost
+    return cost
 
 
-def track_cost(model, input_tokens, output_tokens):
-    """Track API costs."""
-    if model in COSTS:
-        cost = (input_tokens * COSTS[model]["input"] + output_tokens * COSTS[model]["output"]) / 1_000_000
-        st.session_state.session_cost += cost
-        st.session_state.total_cost += cost
-        return cost
-    return 0
+# ============ Claude Web Search ============
 
-
-def score_source_reliability(url, title=""):
-    """Score source reliability (0-1)."""
-    score = 0.5
-
-    # Official domains boost
-    official = ['.gov', '.edu', '.org', 'official', 'pricing', 'docs.']
-    if any(x in url.lower() for x in official):
-        score += 0.2
-
-    # Known reliable sources
-    reliable = ['github.com', 'stackoverflow.com', 'wikipedia.org', 'reuters.com', 'techcrunch.com']
-    if any(x in url.lower() for x in reliable):
-        score += 0.15
-
-    # Comparison/review sites
-    reviews = ['g2.com', 'capterra.com', 'trustpilot', 'review', 'compare', 'versus']
-    if any(x in url.lower() for x in reviews):
-        score += 0.1
-
-    # Penalize suspicious patterns
-    suspicious = ['spam', 'click', 'track', 'redirect', 'bit.ly', 'tinyurl']
-    if any(x in url.lower() for x in suspicious):
-        score -= 0.3
-
-    return max(0, min(1, score))
-
-
-# ============ API Integrations ============
-
-def brave_search(query, count=10):
-    """Search using Brave Search API."""
-    api_key = get_secret('BRAVE_API_KEY')
-    if not api_key:
-        return []
-
+def research_with_web_search(client, query, max_searches=5):
+    """
+    Use Claude's built-in web search for grounded research.
+    Returns structured response with text and citations.
+    """
     try:
-        with httpx.Client(timeout=15) as client:
-            resp = client.get(
-                "https://api.search.brave.com/res/v1/web/search",
-                headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
-                params={"q": query, "count": count}
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            results = []
-            for item in data.get("web", {}).get("results", []):
-                results.append({
-                    "url": item.get("url"),
-                    "title": item.get("title"),
-                    "description": item.get("description", ""),
-                    "type": "search"
-                })
-            return results
-    except Exception as e:
-        return []
-
-
-def firecrawl_scrape(url):
-    """Scrape URL using Firecrawl API."""
-    api_key = get_secret('FIRECRAWL_API_KEY')
-    if not api_key:
-        return None, "No Firecrawl API key"
-
-    try:
-        with httpx.Client(timeout=30) as client:
-            resp = client.post(
-                "https://api.firecrawl.dev/v0/scrape",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"url": url, "pageOptions": {"onlyMainContent": True}}
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            if data.get("success"):
-                content = data.get("data", {})
-                markdown = content.get("markdown", "")
-                metadata = content.get("metadata", {})
-                return {"markdown": markdown, "title": metadata.get("title", ""), "metadata": metadata}, None
-            return None, "Scrape failed"
-    except Exception as e:
-        return None, str(e)
-
-
-# ============ Research Functions ============
-
-def understand_query(client, query):
-    """Analyze and plan the research."""
-    response = client.messages.create(
-        model=MODELS["planner"],
-        max_tokens=1000,
-        messages=[{"role": "user", "content": f"""Analyze this research request:
-
-"{query}"
-
-Return JSON only:
-{{
-    "clear": true,
-    "type": "pricing|comparison|features|general|deep_dive",
-    "subjects": ["specific items to research"],
-    "search_queries": ["2-3 optimized search queries"],
-    "data_needed": ["specific data points"],
-    "schema": {{"field_name": "what to extract"}},
-    "clarification": null
-}}
-
-If unclear, set clear=false and provide clarification question.
-Design schema with 4-6 relevant fields for the topic."""}]
-    )
-
-    track_cost(MODELS["planner"], response.usage.input_tokens, response.usage.output_tokens)
-
-    text = response.content[0].text.strip()
-    if "```" in text:
-        text = text.split("```")[1].replace("json", "").strip()
-    if not text.startswith("{"):
-        text = text[text.find("{"):]
-    return json.loads(text)
-
-
-def search_sources(client, query, search_queries):
-    """Find sources using Brave Search + LLM fallback."""
-    all_results = []
-
-    # Try Brave Search first
-    for sq in search_queries[:3]:
-        results = brave_search(sq, count=5)
-        all_results.extend(results)
-
-    # Deduplicate by URL
-    seen = set()
-    unique = []
-    for r in all_results:
-        if r["url"] not in seen:
-            seen.add(r["url"])
-            r["reliability"] = score_source_reliability(r["url"], r.get("title", ""))
-            unique.append(r)
-
-    # If Brave didn't work, fall back to LLM
-    if not unique:
         response = client.messages.create(
-            model=MODELS["planner"],
-            max_tokens=1500,
-            messages=[{"role": "user", "content": f"""Find 6-8 real, working URLs for: {query}
+            model=MODEL,
+            max_tokens=4096,
+            betas=[WEB_SEARCH_BETA],
+            tools=[{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": max_searches
+            }],
+            messages=[{
+                "role": "user",
+                "content": f"""Research the following topic and provide a comprehensive, well-organized response:
 
-Return JSON array only:
-[{{"url": "https://...", "title": "...", "type": "official|review|comparison"}}]
+{query}
 
-Use real URLs that actually exist. Prioritize official sites and reputable sources."""}]
-        )
-        track_cost(MODELS["planner"], response.usage.input_tokens, response.usage.output_tokens)
-
-        text = response.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1].replace("json", "").strip()
-        if not text.startswith("["):
-            text = text[text.find("["):]
-
-        try:
-            sources = json.loads(text)
-            for s in sources:
-                s["reliability"] = score_source_reliability(s["url"], s.get("title", ""))
-            unique = sources
-        except:
-            unique = []
-
-    # Sort by reliability
-    unique.sort(key=lambda x: x.get("reliability", 0.5), reverse=True)
-    return unique[:8]
-
-
-def extract_from_source(client, source, schema, topic, cache_dict):
-    """Extract data from a single source. Thread-safe version."""
-    url = source["url"]
-    ck = cache_key(url)
-
-    # Check cache (passed as parameter for thread safety)
-    if ck in cache_dict:
-        cached = cache_dict[ck]
-        return {**cached, '_url': url, '_cached': True, '_ok': True, '_cache_key': ck}
-
-    content = None
-    method = "unknown"
-
-    # Strategy 1: Firecrawl (best for JS-heavy sites)
-    fc_result, fc_error = firecrawl_scrape(url)
-    if fc_result:
-        content = fc_result.get("markdown", "")[:4000]
-        method = "firecrawl"
-
-    # Strategy 2: Direct fetch + CSS/Regex extraction
-    if not content and EXTRACTION_AVAILABLE:
-        try:
-            html, _ = fetch_html_sync(url, timeout=10)
-            if html:
-                extractor = MultiStrategyExtractor(html, url)
-                result = extractor.extract_all(schema)
-                if result.confidence >= 0.5:
-                    return {**result.data, '_url': url, '_method': 'css/regex', '_confidence': result.confidence, '_ok': True, '_cache_key': ck, '_cache_data': result.data}
-                content = html[:4000]
-                method = "html"
-        except:
-            pass
-
-    # Strategy 3: LLM extraction
-    try:
-        prompt = f"""Extract data from this source about: {topic}
-
-URL: {url}
-{f'CONTENT:\n{content}' if content else 'Note: Could not fetch content. Use your knowledge about this URL.'}
-
-EXTRACT THESE FIELDS:
-{json.dumps(schema, indent=2)}
-
-Return ONLY a valid JSON object. Use null for fields you cannot find."""
-
-        response = client.messages.create(
-            model=MODELS["extractor"],
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}]
+Requirements:
+1. Search for current, accurate information
+2. Compare options if the query involves comparison
+3. Include specific data (prices, features, dates) when available
+4. Organize with clear headings and bullet points
+5. If comparing items, create a summary table at the end
+6. Be specific and cite your sources"""
+            }]
         )
 
-        # Return cost info for tracking in main thread
-        cost_info = {
-            'model': MODELS["extractor"],
+        # Track cost
+        track_cost(response.usage.input_tokens, response.usage.output_tokens)
+
+        # Parse response
+        text_content = ""
+        sources = []
+        search_queries_used = []
+
+        for block in response.content:
+            if block.type == "text":
+                text_content += block.text
+            elif block.type == "web_search_tool_result":
+                for result in block.content:
+                    if hasattr(result, 'url'):
+                        sources.append({
+                            'url': result.url,
+                            'title': getattr(result, 'title', ''),
+                            'snippet': getattr(result, 'snippet', getattr(result, 'encrypted_content', ''))[:200]
+                        })
+
+        # Dedupe sources by URL
+        seen = set()
+        unique_sources = []
+        for s in sources:
+            if s['url'] not in seen:
+                seen.add(s['url'])
+                unique_sources.append(s)
+
+        return {
+            'text': text_content,
+            'sources': unique_sources[:10],  # Top 10 sources
+            'search_count': response.usage.server_tool_use.get('web_search_requests', 0) if hasattr(response.usage, 'server_tool_use') else 0,
             'input_tokens': response.usage.input_tokens,
-            'output_tokens': response.usage.output_tokens
+            'output_tokens': response.usage.output_tokens,
+            'success': True
         }
 
-        text = response.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-        if not text.startswith("{"):
-            start = text.find("{")
-            if start != -1:
-                text = text[start:]
+    except Exception as e:
+        return {
+            'text': f"Error during research: {str(e)}",
+            'sources': [],
+            'success': False,
+            'error': str(e)
+        }
 
-        data = json.loads(text)
-        return {**data, '_url': url, '_method': method or 'llm', '_ok': True, '_cache_key': ck, '_cache_data': data, '_cost': cost_info}
+
+def answer_followup(client, question, context):
+    """Answer follow-up question using previous research context."""
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=2048,
+            betas=[WEB_SEARCH_BETA],
+            tools=[{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 3
+            }],
+            messages=[{
+                "role": "user",
+                "content": f"""Previous research topic: {context.get('query', 'Unknown')}
+
+Previous findings summary:
+{context.get('text', '')[:2000]}
+
+Follow-up question: {question}
+
+Answer the follow-up question. Search for additional information if needed."""
+            }]
+        )
+
+        track_cost(response.usage.input_tokens, response.usage.output_tokens)
+
+        text = ""
+        for block in response.content:
+            if block.type == "text":
+                text += block.text
+
+        return text
 
     except Exception as e:
-        return {'_url': url, '_error': str(e)[:100], '_ok': False}
-
-
-def synthesize_results(client, query, results, research_type):
-    """Synthesize findings with streaming."""
-    good = [r for r in results if r.get('_ok')]
-
-    prompt = f"""Synthesize this research on: {query}
-
-Data from {len(good)} sources:
-{json.dumps(good, indent=2)}
-
-Return JSON:
-{{
-    "summary": "2-3 sentence executive summary",
-    "findings": ["key finding 1", "key finding 2", "key finding 3"],
-    "table": {{"headers": ["Name", "Key Info", ...], "rows": [["Item", "Details", ...], ...]}},
-    "recommendation": "brief actionable recommendation",
-    "follow_up_questions": ["suggested follow-up 1", "suggested follow-up 2", "suggested follow-up 3"],
-    "confidence": 0.0-1.0
-}}
-
-Make the table comprehensive. Include all items with their key details."""
-
-    response = client.messages.create(
-        model=MODELS["synthesizer"],
-        max_tokens=2500,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    track_cost(MODELS["synthesizer"], response.usage.input_tokens, response.usage.output_tokens)
-
-    text = response.content[0].text
-    if "```" in text:
-        text = text.split("```")[1].replace("json", "").strip()
-    if not text.startswith("{"):
-        text = text[text.find("{"):]
-
-    return json.loads(text)
-
-
-def answer_followup(client, question, research):
-    """Answer follow-up question about research."""
-    response = client.messages.create(
-        model=MODELS["planner"],
-        max_tokens=1000,
-        messages=[{"role": "user", "content": f"""Based on this research:
-
-Topic: {research.get('query')}
-Findings: {json.dumps(research.get('synthesis', {}))}
-Raw Data: {json.dumps(research.get('results', [])[:5])}
-
-Question: {question}
-
-Give a concise, specific answer referencing the data. If the data doesn't contain the answer, say so."""}]
-    )
-    track_cost(MODELS["planner"], response.usage.input_tokens, response.usage.output_tokens)
-    return response.content[0].text
+        return f"Error: {str(e)}"
 
 
 # ============ UI Components ============
 
 def render_header():
-    """Render app header with status badges."""
-    brave_ok = bool(get_secret('BRAVE_API_KEY'))
-    firecrawl_ok = bool(get_secret('FIRECRAWL_API_KEY'))
-
-    badges = []
-    if brave_ok:
-        badges.append('<span class="badge active">🔍 Brave Search</span>')
-    if firecrawl_ok:
-        badges.append('<span class="badge active">🔥 Firecrawl</span>')
-    if EXTRACTION_AVAILABLE:
-        badges.append('<span class="badge active">⚡ Fast Extract</span>')
-
-    st.markdown(f'''
+    st.markdown('''
     <div class="app-header">
         <h1>🔬 Research Assistant</h1>
         <p>AI-powered research with real-time web search</p>
         <div class="status-bar">
-            {' '.join(badges)}
+            <span class="badge active">🌐 Claude Web Search</span>
+            <span class="badge active">📊 Grounded Citations</span>
         </div>
     </div>
     ''', unsafe_allow_html=True)
 
 
 def render_message(msg, msg_idx=0):
-    """Render a chat message."""
     if msg['role'] == 'user':
         st.markdown(f'<div class="user-msg">{msg["content"]}</div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="assistant-msg">{msg["content"]}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="assistant-msg">', unsafe_allow_html=True)
+
+        # Render the text content
+        text = msg.get('content', '')
+        st.markdown(text)
+
+        st.markdown('</div>', unsafe_allow_html=True)
 
         # Render research results if present
         if msg.get('research'):
@@ -625,53 +388,24 @@ def render_message(msg, msg_idx=0):
 
 
 def render_research_results(research, msg_idx=0):
-    """Render research results with unique keys."""
-    synthesis = research.get('synthesis', {})
-    # Create unique key prefix from timestamp or index
-    key_prefix = research.get('timestamp', str(msg_idx))[:20].replace(':', '').replace('-', '')
-    results = research.get('results', [])
+    key_prefix = str(msg_idx)
+    sources = research.get('sources', [])
 
-    # Summary
-    if synthesis.get('summary'):
-        st.info(synthesis['summary'])
-
-    # Table
-    if synthesis.get('table'):
-        table = synthesis['table']
-        if table.get('headers') and table.get('rows'):
-            df = pd.DataFrame(table['rows'], columns=table['headers'])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-    # Findings
-    if synthesis.get('findings'):
-        with st.expander("🔍 Key Findings", expanded=False):
-            for f in synthesis['findings']:
-                st.markdown(f"• {f}")
-
-    # Recommendation
-    if synthesis.get('recommendation'):
-        st.success(f"💡 **Recommendation:** {synthesis['recommendation']}")
-
-    # Sources with reliability
-    if results:
-        successful = [r for r in results if r.get('_ok')]
-        with st.expander(f"📚 Sources ({len(successful)}/{len(results)} successful)"):
-            for r in results:
-                url = r.get('_url', '')
-                reliability = score_source_reliability(url)
-                level = "high" if reliability > 0.6 else "medium" if reliability > 0.4 else "low"
-                method = r.get('_method', 'unknown')
-                cached = "📦" if r.get('_cached') else ""
-
-                if r.get('_ok'):
-                    st.markdown(f'<a href="{url}" target="_blank" class="source-pill {level}">{cached} {url[:40]}... ({method})</a>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<span class="source-pill low">❌ {url[:40]}...</span>', unsafe_allow_html=True)
+    # Sources section
+    if sources:
+        with st.expander(f"📚 Sources ({len(sources)} citations)", expanded=False):
+            for i, s in enumerate(sources):
+                st.markdown(f"""
+                <div class="source-item">
+                    <span class="source-title">[{i+1}] {s.get('title', 'Source')[:60]}</span><br>
+                    <a href="{s.get('url', '#')}" target="_blank" class="source-url">{s.get('url', '')[:80]}...</a>
+                </div>
+                """, unsafe_allow_html=True)
 
     # Export buttons
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
-        json_data = export_to_json(research)
+        json_data = json.dumps(research, indent=2, default=str)
         st.download_button(
             "📥 JSON",
             json_data,
@@ -680,68 +414,20 @@ def render_research_results(research, msg_idx=0):
             use_container_width=True,
             key=f"dl_json_{key_prefix}"
         )
-    with col2:
-        csv_data = export_to_csv(research)
-        if csv_data:
-            st.download_button(
-                "📥 CSV",
-                csv_data,
-                file_name=f"research_{key_prefix}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key=f"dl_csv_{key_prefix}"
-            )
 
-    # Follow-up suggestions
-    if synthesis.get('follow_up_questions'):
-        st.markdown("**Suggested follow-ups:**")
-        cols = st.columns(min(3, len(synthesis['follow_up_questions'])))
-        for i, q in enumerate(synthesis['follow_up_questions'][:3]):
-            with cols[i]:
-                if st.button(q[:40] + "...", key=f"followup_{key_prefix}_{i}", use_container_width=True):
-                    st.session_state.pending_query = q
-                    st.rerun()
-
-
-def render_progress(steps, current_step):
-    """Render progress indicator."""
-    html = '<div class="progress-container">'
-    for i, step in enumerate(steps):
-        if i < current_step:
-            html += f'<div class="progress-step done"><span class="icon">✓</span> {step}</div>'
-        elif i == current_step:
-            html += f'<div class="progress-step active"><span class="icon">●</span> {step}...</div>'
-        else:
-            html += f'<div class="progress-step"><span class="icon">○</span> {step}</div>'
-    html += '</div>'
-    return html
+    # Stats
+    with col3:
+        searches = research.get('search_count', 0)
+        st.caption(f"🔍 {searches} web searches")
 
 
 def render_cost_badge():
-    """Render floating cost badge."""
     if st.session_state.session_cost > 0:
         st.markdown(f'''
         <div class="cost-badge">
-            💰 Session: ${st.session_state.session_cost:.4f}
+            💰 ${st.session_state.session_cost:.4f}
         </div>
         ''', unsafe_allow_html=True)
-
-
-# ============ Export Functions ============
-
-def export_to_json(research):
-    """Export research to JSON."""
-    return json.dumps(research, indent=2, default=str)
-
-
-def export_to_csv(research):
-    """Export research table to CSV."""
-    synthesis = research.get('synthesis', {})
-    table = synthesis.get('table', {})
-    if table.get('headers') and table.get('rows'):
-        df = pd.DataFrame(table['rows'], columns=table['headers'])
-        return df.to_csv(index=False)
-    return ""
 
 
 # ============ Main App ============
@@ -754,7 +440,7 @@ def main():
 
     render_header()
 
-    # Sidebar for history and settings
+    # Sidebar
     with st.sidebar:
         st.markdown("### History")
         if st.session_state.history:
@@ -766,14 +452,8 @@ def main():
             st.caption("No research history yet")
 
         st.divider()
-
-        st.markdown("### Session Stats")
-        st.caption(f"Cost: ${st.session_state.session_cost:.4f}")
-        st.caption(f"Cached URLs: {len(st.session_state.cache)}")
-
-        if st.button("Clear Cache", use_container_width=True):
-            st.session_state.cache = {}
-            st.rerun()
+        st.markdown("### Stats")
+        st.caption(f"Session cost: ${st.session_state.session_cost:.4f}")
 
     # Chat history
     for idx, msg in enumerate(st.session_state.messages):
@@ -784,9 +464,9 @@ def main():
         st.markdown("#### Try asking:")
         examples = [
             "Compare pricing for Notion vs Obsidian vs Roam",
-            "Research top 5 CRM tools for startups",
-            "What are the best project management tools in 2024?",
-            "Compare cloud hosting: AWS vs GCP vs Azure pricing"
+            "What are the top 5 CRM tools for startups in 2025?",
+            "Compare AWS vs GCP vs Azure pricing and features",
+            "Best project management software for remote teams"
         ]
         cols = st.columns(2)
         for i, ex in enumerate(examples):
@@ -819,7 +499,7 @@ def main():
             })
             st.rerun()
 
-        # Check if this is a follow-up
+        # Check if follow-up question
         current_research = None
         for msg in reversed(st.session_state.messages[:-1]):
             if msg.get('research'):
@@ -827,112 +507,44 @@ def main():
                 break
 
         if current_research and len(query.split()) < 20:
-            with st.spinner("Thinking..."):
+            # Answer follow-up
+            with st.spinner("Researching..."):
                 answer = answer_followup(client, query, current_research)
-            st.session_state.messages.append({'role': 'assistant', 'content': answer})
+            st.session_state.messages.append({
+                'role': 'assistant',
+                'content': answer
+            })
             st.rerun()
 
         # New research
-        steps = ["Understanding request", "Searching sources", "Extracting data", "Synthesizing findings"]
-        progress = st.empty()
+        with st.spinner("🔍 Searching the web and analyzing results..."):
+            result = research_with_web_search(client, query)
 
-        # Step 1: Understand
-        progress.markdown(render_progress(steps, 0), unsafe_allow_html=True)
-        try:
-            parsed = understand_query(client, query)
-        except Exception as e:
-            parsed = {'clear': True, 'subjects': [query], 'search_queries': [query], 'schema': {'name': 'Name', 'details': 'Details'}}
+        if result['success']:
+            # Add to history
+            st.session_state.history.append({
+                'query': query,
+                'messages': st.session_state.messages.copy(),
+                'timestamp': datetime.now().isoformat()
+            })
 
-        if not parsed.get('clear') and parsed.get('clarification'):
-            st.session_state.messages.append({'role': 'assistant', 'content': parsed['clarification']})
-            progress.empty()
-            st.rerun()
-
-        # Step 2: Search
-        progress.markdown(render_progress(steps, 1), unsafe_allow_html=True)
-        sources = search_sources(client, query, parsed.get('search_queries', [query]))
-
-        if not sources:
+            # Add response
             st.session_state.messages.append({
                 'role': 'assistant',
-                'content': "I couldn't find relevant sources. Could you try rephrasing your query?"
+                'content': result['text'],
+                'research': {
+                    'query': query,
+                    'text': result['text'],
+                    'sources': result['sources'],
+                    'search_count': result.get('search_count', 0),
+                    'timestamp': datetime.now().isoformat()
+                }
             })
-            progress.empty()
-            st.rerun()
-
-        # Step 3: Extract
-        progress.markdown(render_progress(steps, 2), unsafe_allow_html=True)
-        schema = parsed.get('schema', {'name': 'Name', 'info': 'Key information'})
-
-        # Get cache snapshot for thread-safe access
-        cache_snapshot = dict(st.session_state.cache)
-
-        results = []
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            futures = {ex.submit(extract_from_source, client, s, schema, query, cache_snapshot): s for s in sources}
-            done_count = 0
-            for future in as_completed(futures):
-                result = future.result()
-                results.append(result)
-
-                # Update cache and costs in main thread
-                if result.get('_cache_key') and result.get('_cache_data'):
-                    st.session_state.cache[result['_cache_key']] = result['_cache_data']
-                if result.get('_cost'):
-                    cost = result['_cost']
-                    track_cost(cost['model'], cost['input_tokens'], cost['output_tokens'])
-
-                done_count += 1
-                progress.markdown(
-                    render_progress(steps, 2) + f'<p style="font-size:0.8rem;color:#666;margin-left:2rem;">({done_count}/{len(sources)} sources)</p>',
-                    unsafe_allow_html=True
-                )
-
-        # Step 4: Synthesize
-        progress.markdown(render_progress(steps, 3), unsafe_allow_html=True)
-        try:
-            synthesis = synthesize_results(client, query, results, parsed.get('type', 'general'))
-        except Exception as e:
-            synthesis = {
-                'summary': f'Research completed with {sum(1 for r in results if r.get("_ok"))} sources.',
-                'findings': [],
-                'follow_up_questions': []
-            }
-
-        progress.empty()
-
-        # Build research object
-        research_data = {
-            'query': query,
-            'parsed': parsed,
-            'sources': sources,
-            'results': results,
-            'synthesis': synthesis,
-            'timestamp': datetime.now().isoformat(),
-            'cost': st.session_state.session_cost
-        }
-
-        # Add to history
-        st.session_state.history.append({
-            'query': query,
-            'messages': st.session_state.messages.copy(),
-            'timestamp': datetime.now().isoformat()
-        })
-
-        # Add response
-        successful = sum(1 for r in results if r.get('_ok'))
-        cached = sum(1 for r in results if r.get('_cached'))
-
-        response_text = f"Here's what I found ({successful} sources"
-        if cached:
-            response_text += f", {cached} cached"
-        response_text += "):"
-
-        st.session_state.messages.append({
-            'role': 'assistant',
-            'content': response_text,
-            'research': research_data
-        })
+        else:
+            st.session_state.messages.append({
+                'role': 'assistant',
+                'content': f"I encountered an issue: {result.get('error', 'Unknown error')}. Please try again."
+            })
 
         st.rerun()
 
