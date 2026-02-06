@@ -290,25 +290,35 @@ def understand_query(client, query):
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1000,
-        messages=[{"role": "user", "content": f"""Analyze this research request:
+        messages=[{"role": "user", "content": f"""Analyze this research request and prepare a research plan.
 
-"{query}"
+USER REQUEST: "{query}"
 
-Return JSON:
+Return ONLY a JSON object (no other text):
 {{
-    "clear": true/false,
+    "clear": true,
     "type": "pricing|comparison|features|general",
-    "subjects": ["what to research"],
-    "data_needed": ["specific data points"],
-    "clarification": "question to ask if unclear, or null",
-    "schema": {{"field": "what to extract"}}
+    "subjects": ["list of specific things to research"],
+    "data_needed": ["specific data points to find"],
+    "clarification": null,
+    "schema": {{
+        "name": "Name of the item",
+        "field2": "Description of what to extract"
+    }}
 }}
 
-Be helpful - if reasonably clear, set clear=true and proceed."""}]
+If the request is unclear, set "clear": false and provide a clarification question.
+Otherwise, set "clear": true and design a good extraction schema with 4-6 relevant fields.
+
+Return ONLY valid JSON, no explanation."""}]
     )
-    text = response.content[0].text
+    text = response.content[0].text.strip()
     if "```" in text:
         text = text.split("```")[1].replace("json", "").strip()
+    if not text.startswith("{"):
+        start = text.find("{")
+        if start != -1:
+            text = text[start:]
     return json.loads(text)
 
 
@@ -317,15 +327,32 @@ def find_sources(client, query, subjects):
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1500,
-        messages=[{"role": "user", "content": f"""Find 6-8 URLs for researching: {query}
-Subjects: {', '.join(subjects)}
+        messages=[{"role": "user", "content": f"""Find 6-8 real, working URLs for this research:
 
-Return JSON array: [{{"url": "...", "title": "...", "type": "official|review|news"}}]
-Focus on official sites and reputable sources."""}]
+TOPIC: {query}
+SUBJECTS: {', '.join(subjects) if subjects else query}
+
+Return ONLY a JSON array of sources:
+[
+    {{"url": "https://example.com/pricing", "title": "Example Pricing Page", "type": "official"}},
+    {{"url": "https://...", "title": "...", "type": "review"}}
+]
+
+REQUIREMENTS:
+- Use real URLs that actually exist
+- Prioritize official pricing/product pages
+- Include 1-2 comparison or review articles
+- Type should be: official, review, news, or comparison
+
+Return ONLY the JSON array, no other text."""}]
     )
-    text = response.content[0].text
+    text = response.content[0].text.strip()
     if "```" in text:
         text = text.split("```")[1].replace("json", "").strip()
+    if not text.startswith("["):
+        start = text.find("[")
+        if start != -1:
+            text = text[start:]
     return json.loads(text)
 
 
@@ -347,19 +374,41 @@ def extract_data(client, url, schema, topic):
 
     # LLM extraction
     try:
+        prompt = f"""You are a data extraction assistant. Extract information from this URL.
+
+URL: {url}
+{f'PAGE CONTENT:\n{html[:3000]}' if html else 'Note: Could not fetch page content. Use your knowledge about this URL.'}
+
+EXTRACT THESE FIELDS:
+{json.dumps(schema, indent=2)}
+
+IMPORTANT: Return ONLY a valid JSON object matching the schema. Use null for any field you cannot find.
+Do not include any explanation or text outside the JSON object."""
+
         response = client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-haiku-4-5-20251001",
             max_tokens=1500,
-            messages=[{"role": "user", "content": f"""Extract from {url} for: {topic}
-{f'Content: {html[:2500]}' if html else ''}
-Schema: {json.dumps(schema)}
-Return JSON. Use null for missing."""}]
+            messages=[{"role": "user", "content": prompt}]
         )
-        text = response.content[0].text
+        text = response.content[0].text.strip()
+
+        # Clean up JSON from markdown code blocks
         if "```" in text:
-            text = text.split("```")[1].replace("json", "").strip()
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+
+        # Try to find JSON object if there's extra text
+        if not text.startswith("{"):
+            start = text.find("{")
+            if start != -1:
+                text = text[start:]
+
         data = json.loads(text)
         return {**data, '_url': url, '_method': 'ai', '_ok': '_error' not in data}
+    except json.JSONDecodeError as e:
+        return {'_url': url, '_error': f'JSON parse error: {str(e)[:50]}', '_ok': False, '_raw': text[:200] if 'text' in dir() else ''}
     except Exception as e:
         return {'_url': url, '_error': str(e), '_ok': False}
 
