@@ -249,7 +249,7 @@ def research_with_web_search(client, query, max_searches=5):
         response = client.messages.create(
             model=MODEL,
             max_tokens=4096,
-            betas=[WEB_SEARCH_BETA],
+            extra_headers={"anthropic-beta": WEB_SEARCH_BETA},
             tools=[{
                 "type": "web_search_20250305",
                 "name": "web_search",
@@ -323,7 +323,7 @@ def answer_followup(client, question, context):
         response = client.messages.create(
             model=MODEL,
             max_tokens=2048,
-            betas=[WEB_SEARCH_BETA],
+            extra_headers={"anthropic-beta": WEB_SEARCH_BETA},
             tools=[{
                 "type": "web_search_20250305",
                 "name": "web_search",
